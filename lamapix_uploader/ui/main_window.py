@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -21,20 +22,23 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import NOM_APPLICATION, VERSION, paths
+from .. import NOM_APPLICATION, VERSION, paths, updater
 from ..config import Config
 from ..engine import Etat, Moteur
 from . import theme
 from .init_dialog import DialogueInitialisation
 from .settings_dialog import DialogueReglages
+from .update import ChercheurMiseAJour, TelechargeurMiseAJour
 
 RAFRAICHISSEMENT_MS = 1000
+DELAI_VERIF_MAJ_MS = 3000
 
 
 class Carte(QFrame):
@@ -71,6 +75,9 @@ class FenetrePrincipale(QMainWindow):
         self._icone = icone
         self._quitter_pour_de_bon = False
         self._evenements_affiches: list[str] = []
+        self._chercheur: ChercheurMiseAJour | None = None
+        self._telechargeur: TelechargeurMiseAJour | None = None
+        self._progres: QProgressDialog | None = None
 
         self.setWindowTitle(f"{NOM_APPLICATION} {VERSION}")
         self.setMinimumSize(760, 640)
@@ -84,6 +91,13 @@ class FenetrePrincipale(QMainWindow):
         self._minuteur.timeout.connect(self._rafraichir)
         self._minuteur.start(RAFRAICHISSEMENT_MS)
         self._rafraichir()
+
+        # Après l'affichage : la fenêtre doit apparaître tout de suite, même si
+        # GitHub met dix secondes à répondre.
+        if config.verifier_mises_a_jour:
+            QTimer.singleShot(
+                DELAI_VERIF_MAJ_MS, lambda: self._verifier_maj(silencieux=True)
+            )
 
     # ---------------------------------------------------------------- montage
 
@@ -144,6 +158,12 @@ class FenetrePrincipale(QMainWindow):
         self.badge_pause.setObjectName("badgePause")
         self.badge_pause.hide()
 
+        self.bouton_maj = QPushButton("Mise à jour")
+        self.bouton_maj.setToolTip(
+            "Chercher tout de suite une nouvelle version et l'installer."
+        )
+        self.bouton_maj.clicked.connect(lambda: self._verifier_maj(silencieux=False))
+
         bouton_reglages = QPushButton("Réglages")
         bouton_reglages.clicked.connect(self._ouvrir_reglages)
 
@@ -151,6 +171,7 @@ class FenetrePrincipale(QMainWindow):
         ligne.addSpacing(12)
         ligne.addWidget(self.etiquette_evenement, 1)
         ligne.addWidget(self.badge_pause)
+        ligne.addWidget(self.bouton_maj)
         ligne.addWidget(bouton_reglages)
         return ligne
 
@@ -337,6 +358,110 @@ class FenetrePrincipale(QMainWindow):
         if dialogue.exec():
             self.moteur.recharger_config()
 
+    # -------------------------------------------------------------- mise à jour
+
+    def _verifier_maj(self, silencieux: bool) -> None:
+        """`silencieux` : vérification au démarrage, qui ne dit rien s'il n'y a
+        rien. À la demande, au contraire, on répond toujours quelque chose."""
+        if self._chercheur is not None:
+            return
+        if not silencieux:
+            self.bouton_maj.setEnabled(False)
+            self.bouton_maj.setText("Vérification…")
+        self._chercheur = ChercheurMiseAJour(self.config.depot_mises_a_jour, self)
+        self._chercheur.fini.connect(
+            lambda trouvee: self._reponse_maj(trouvee, silencieux)
+        )
+        self._chercheur.demarrer()
+
+    def _reponse_maj(self, trouvee, silencieux: bool) -> None:
+        self._chercheur = None
+        self.bouton_maj.setEnabled(True)
+        self.bouton_maj.setText("Mise à jour")
+
+        if trouvee is None:
+            self.moteur.journal.ecrire("Vérification des mises à jour : sans réponse")
+            if not silencieux:
+                QMessageBox.warning(
+                    self,
+                    "Mise à jour",
+                    "Impossible de joindre GitHub.\n\n"
+                    "Sans importance : l'outil continue d'envoyer normalement.",
+                )
+            return
+
+        if not trouvee.plus_recente:
+            if not silencieux:
+                QMessageBox.information(
+                    self, "Mise à jour", f"Vous êtes à jour (version {VERSION})."
+                )
+            return
+
+        self.moteur.journal.ecrire(f"Mise à jour disponible : version {trouvee.version}")
+
+        if not paths.est_gele():
+            QMessageBox.information(
+                self,
+                "Mise à jour",
+                f"Version {trouvee.version} disponible (vous avez {VERSION}).\n\n"
+                "Vous tournez depuis les sources : faites un « git pull ».",
+            )
+            return
+
+        notes = (trouvee.notes or "").strip()
+        if len(notes) > 400:
+            notes = notes[:400] + "…"
+        reponse = QMessageBox.question(
+            self,
+            "Mise à jour disponible",
+            f"Version {trouvee.version} disponible (vous avez {VERSION}).\n\n"
+            f"{notes}\n\n"
+            "Installer maintenant ? L'outil se ferme et se relance seul. "
+            "La mémoire est conservée : les envois reprennent où ils en étaient.",
+        )
+        if reponse == QMessageBox.StandardButton.Yes:
+            self._telecharger_maj(trouvee)
+
+    def _telecharger_maj(self, trouvee) -> None:
+        self._progres = QProgressDialog(
+            f"Téléchargement de la version {trouvee.version}…", "", 0, 0, self
+        )
+        self._progres.setWindowTitle("Mise à jour")
+        self._progres.setCancelButton(None)   # un exe à moitié écrit ne sert à rien
+        self._progres.setWindowModality(Qt.WindowModality.WindowModal)
+        self._progres.show()
+
+        self._telechargeur = TelechargeurMiseAJour(trouvee, self)
+        self._telechargeur.fini.connect(self._installer_maj)
+        self._telechargeur.echec.connect(self._echec_maj)
+        self._telechargeur.demarrer()
+
+    def _installer_maj(self, chemin) -> None:
+        self._fermer_progres()
+        try:
+            updater.appliquer(chemin)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Mise à jour", f"Installation impossible.\n\n{exc}"
+            )
+            return
+        self.moteur.journal.ecrire("Mise à jour : redémarrage en cours")
+        self._quitter()
+
+    def _echec_maj(self, message: str) -> None:
+        self._fermer_progres()
+        QMessageBox.critical(
+            self,
+            "Mise à jour",
+            f"Téléchargement impossible.\n\n{message}\n\n"
+            "L'outil continue de fonctionner normalement.",
+        )
+
+    def _fermer_progres(self) -> None:
+        if self._progres is not None:
+            self._progres.close()
+            self._progres = None
+
     def _ouvrir_dossier(self) -> None:
         import os
 
@@ -447,8 +572,20 @@ class FenetrePrincipale(QMainWindow):
         self.activateWindow()
 
     def _quitter(self) -> None:
+        """Arrêt réel du process.
+
+        `setQuitOnLastWindowClosed(False)` — nécessaire pour survivre à la
+        fermeture de la fenêtre — signifie aussi que fermer ne suffit PAS à
+        quitter : sans `quit()` explicite, l'outil restait vivant, invisible,
+        avec son moteur qui tournait toujours.
+        """
         self._quitter_pour_de_bon = True
         self.close()
+        if getattr(self, "icone_zone", None) is not None:
+            self.icone_zone.hide()
+        application = QApplication.instance()
+        if application is not None:
+            application.quit()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Fermer la fenêtre ne doit pas couper les envois en plein concours."""

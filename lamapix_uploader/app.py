@@ -8,12 +8,11 @@ s'empilent dans le tampon et la mémoire, et partent dès que ça repasse.
 from __future__ import annotations
 
 import sys
-import threading
 
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from . import NOM_APPLICATION, VERSION, paths, secrets_win, updater
+from . import NOM_APPLICATION, VERSION, paths, secrets_win
 from .config import Config
 from .engine import Moteur
 from .journal import Journal
@@ -40,20 +39,6 @@ def _deja_lance() -> bool:
 
 
 _garder_en_vie: list[object] = []
-
-
-def _verifier_mises_a_jour(config: Config, fenetre: FenetrePrincipale) -> None:
-    """Vérification silencieuse en tâche de fond : jamais bloquante."""
-
-    def travail() -> None:
-        trouvee = updater.chercher(config.depot_mises_a_jour)
-        if trouvee is None or not trouvee.plus_recente or not paths.est_gele():
-            return
-        fenetre.moteur.journal.ecrire(
-            f"Mise à jour disponible : version {trouvee.version}"
-        )
-
-    threading.Thread(target=travail, name="maj", daemon=True).start()
 
 
 def principal(arguments: list[str] | None = None) -> int:
@@ -104,11 +89,10 @@ def principal(arguments: list[str] | None = None) -> int:
     )
     moteur.demarrer()
 
+    # La fenêtre porte elle-même la vérification des mises à jour : elle seule
+    # peut poser la question à l'utilisateur et lancer l'installation.
     fenetre = FenetrePrincipale(config=config, moteur=moteur, icone=icone)
     fenetre.show()
-
-    if config.verifier_mises_a_jour:
-        _verifier_mises_a_jour(config, fenetre)
 
     application.aboutToQuit.connect(moteur.arreter)
     return application.exec()

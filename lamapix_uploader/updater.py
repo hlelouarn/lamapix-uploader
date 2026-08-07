@@ -21,6 +21,7 @@ from . import VERSION, paths
 
 DELAI_RESEAU = 10
 NOM_EXE = "LamapixUploader.exe"
+ESSAIS_REMPLACEMENT = 30  # ~30 s d'attente que Windows relâche l'exe
 
 
 @dataclass
@@ -87,14 +88,27 @@ def appliquer(nouvel_exe: Path) -> None:
 
     exe_actuel = Path(sys.executable)
     script = exe_actuel.parent / "_mise_a_jour.bat"
+    # Windows garde l'exe verrouillé quelques instants après la fermeture : on
+    # réessaie, mais un nombre borné de fois. Une boucle infinie laisserait un
+    # cmd.exe fantôme tourner pour toujours si la copie ne passait jamais
+    # (droits, antivirus, disque plein).
     script.write_text(
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
-        'echo Mise a jour de Lamapix Uploader en cours...\r\n'
-        # On attend que l'exe soit relâché par Windows avant de l'écraser.
+        "echo Mise a jour de Lamapix Uploader en cours...\r\n"
+        "set /a essais=0\r\n"
         ":attendre\r\n"
         "timeout /t 1 /nobreak >nul\r\n"
-        f'copy /Y "{nouvel_exe}" "{exe_actuel}" >nul 2>&1 || goto attendre\r\n'
+        f'copy /Y "{nouvel_exe}" "{exe_actuel}" >nul 2>&1 && goto lancer\r\n'
+        "set /a essais+=1\r\n"
+        f"if %essais% lss {ESSAIS_REMPLACEMENT} goto attendre\r\n"
+        "echo Echec : impossible de remplacer l'executable.\r\n"
+        f'echo Le nouveau fichier reste disponible ici : {nouvel_exe}\r\n'
+        "pause\r\n"
+        f'start "" "{exe_actuel}"\r\n'
+        'del "%~f0"\r\n'
+        "exit /b 1\r\n"
+        ":lancer\r\n"
         f'start "" "{exe_actuel}"\r\n'
         'del "%~f0"\r\n',
         encoding="utf-8",

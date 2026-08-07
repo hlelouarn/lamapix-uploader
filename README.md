@@ -86,6 +86,16 @@ Dans le doute, ne pas cliquer : on paie des doublons, mais on ne perd rien.
 Fermer la fenêtre **n'arrête pas les envois** : l'outil continue près de
 l'horloge. Pour l'arrêter vraiment : clic droit sur l'icône → *Quitter*.
 
+## Mises à jour
+
+L'outil interroge les *releases* GitHub au démarrage. S'il en trouve une plus
+récente, il **propose de l'installer** : il se ferme, se remplace et se relance
+seul. La mémoire et la config sont conservées — les envois reprennent où ils en
+étaient. Le bouton **Mise à jour** force la vérification à tout moment ; il
+répond toujours quelque chose, y compris « vous êtes à jour ».
+
+Hors ligne, la vérification échoue en silence et n'empêche rien.
+
 ---
 
 ## Ce que fait l'outil, dans l'ordre
@@ -141,7 +151,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-93 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+106 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
