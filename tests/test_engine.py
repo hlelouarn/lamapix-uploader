@@ -3,6 +3,8 @@ promesses du brief (jamais deux fois, jamais bloqué, jamais rien perdu)."""
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -33,6 +35,14 @@ def source(tmp_path):
 def deposes(serveur) -> set[str]:
     """Chemins distants effectivement reçus par « Lamapix »."""
     return set(serveur.fichiers)
+
+
+def scanner_sans_envoyer(moteur) -> None:
+    """Le geste réel de l'opérateur avant d'initialiser : mettre en pause, laisser
+    l'outil repérer les photos, puis décider."""
+    moteur.basculer_pause()
+    moteur._un_tour()
+    moteur.basculer_pause()
 
 
 class TestTourNominal:
@@ -266,6 +276,94 @@ class TestBoutons:
         poser_photo(source, PHOTO_C)  # seule la nouveauté doit partir
         moteur._un_tour()
         assert deposes(serveur) == {"2026-08-02GRANDPRIX/MARTIN PAUL_ORAGE/c.jpg"}
+
+    def test_initialiser_peut_poser_une_frontiere_datee(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Le cas qui compte : Kadra s'est arrêté en cours d'événement. On ne
+        déclare envoyé que ce qui précède son arrêt, pas tout le dossier."""
+        poser_photo(source, PHOTO_A)                      # datée d'il y a 1 h
+        recente = poser_photo(source, PHOTO_B)
+        os.utime(recente, (time.time() - 60, time.time() - 60))
+
+        moteur = fabrique_moteur(source)
+        scanner_sans_envoyer(moteur)
+
+        assert moteur.initialiser_memoire(avant=time.time() - 600) == 1
+
+        moteur._un_tour()
+        assert deposes(serveur) == {"2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/b.jpg"}
+
+    def test_apercu_annonce_ce_qui_sera_avale(self, source, fabrique_moteur):
+        """L'utilisateur doit voir le nombre AVANT de valider, pas après."""
+        poser_photo(source, PHOTO_A)
+        recente = poser_photo(source, PHOTO_B)
+        os.utime(recente, (time.time() - 60, time.time() - 60))
+
+        moteur = fabrique_moteur(source)
+        scanner_sans_envoyer(moteur)
+
+        assert moteur.apercu_initialisation() == (2, 2)
+        assert moteur.apercu_initialisation(avant=time.time() - 600) == (1, 2)
+
+    def test_initialiser_marche_meme_apres_un_scan(self, source, fabrique_moteur):
+        """Une photo déjà repérée mais pas encore partie doit être avalée."""
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source)
+        scanner_sans_envoyer(moteur)
+
+        assert moteur.initialiser_memoire() == 1
+
+    def test_initialiser_est_annulable(self, source, serveur, fabrique_moteur):
+        """Le filet : si Kadra n'avait pas fini, les photos enterrées ressortent."""
+        poser_photo(source, PHOTO_A)
+        poser_photo(source, PHOTO_B)
+        moteur = fabrique_moteur(source)
+        scanner_sans_envoyer(moteur)
+        moteur.initialiser_memoire()
+        assert moteur.etat().initialisees == 2
+
+        assert moteur.annuler_initialisation() == 2
+        assert moteur.etat().initialisees == 0
+
+        moteur._un_tour()
+        assert len(deposes(serveur)) == 2
+
+    def test_annuler_ne_renvoie_pas_les_photos_reellement_parties(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Sinon l'annulation créerait les doublons qu'on cherche à éviter."""
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()                       # a.jpg part pour de vrai
+
+        poser_photo(source, PHOTO_B)
+        scanner_sans_envoyer(moteur)
+        moteur.initialiser_memoire()            # n'avale que b.jpg
+        serveur.stors.clear()
+
+        assert moteur.annuler_initialisation() == 1
+        moteur._un_tour()
+        assert serveur.stors == ["2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/b.jpg"]
+
+    def test_un_envoi_reel_ne_compte_pas_comme_initialise(
+        self, source, fabrique_moteur
+    ):
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+        assert (moteur.etat().envoyees, moteur.etat().initialisees) == (1, 0)
+
+    def test_le_drapeau_survit_au_redemarrage(self, source, fabrique_moteur):
+        """Une déclaration reste annulable demain, pas seulement dans la minute."""
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source)
+        scanner_sans_envoyer(moteur)
+        moteur.initialiser_memoire()
+
+        relance = fabrique_moteur(source)
+        assert relance.etat().initialisees == 1
+        assert relance.annuler_initialisation() == 1
 
     def test_reinitialiser_renvoie_tout(self, source, serveur, fabrique_moteur):
         poser_photo(source, PHOTO_A)

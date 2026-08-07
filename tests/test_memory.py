@@ -88,13 +88,47 @@ class TestBoutons:
         assert memoire.en_attente() == []
         assert memoire.nombre_envoyees == 2
 
+    def test_initialiser_avale_aussi_ce_qui_attendait(self, tmp_path):
+        """Une photo repérée mais pas encore partie doit être avalée : sinon le
+        bouton ne marquerait plus rien dès que le premier scan est passé."""
+        memoire = _memoire(tmp_path)
+        memoire.enregistrer("C:/a.jpg", "NOM/a.jpg", 1)
+        nombre = memoire.marquer_tout_envoye([("C:/a.jpg", "NOM/a.jpg", 1)])
+        assert nombre == 1
+        assert memoire.entrees["C:/a.jpg"].envoyee is True
+        assert memoire.entrees["C:/a.jpg"].initialisee is True
+
     def test_initialiser_ne_recrit_pas_lhistoire_des_envois_reels(self, tmp_path):
         memoire = _memoire(tmp_path)
-        memoire.enregistrer("C:/a.jpg", "NOM/a.jpg", 1)  # en attente d'envoi
+        memoire.enregistrer("C:/a.jpg", "NOM/a.jpg", 1)
+        memoire.marquer_envoyee("C:/a.jpg")  # envoi RÉEL
         nombre = memoire.marquer_tout_envoye([("C:/a.jpg", "NOM/autre.jpg", 1)])
         assert nombre == 0
         assert memoire.entrees["C:/a.jpg"].rel == "NOM/a.jpg"
-        assert memoire.entrees["C:/a.jpg"].envoyee is False
+        assert memoire.entrees["C:/a.jpg"].initialisee is False
+
+    def test_annuler_ne_libere_que_les_declarees(self, tmp_path):
+        memoire = _memoire(tmp_path)
+        memoire.enregistrer("C:/reelle.jpg", "NOM/reelle.jpg", 1)
+        memoire.marquer_envoyee("C:/reelle.jpg")
+        memoire.marquer_tout_envoye([("C:/declaree.jpg", "NOM/declaree.jpg", 1)])
+
+        assert memoire.nombre_initialisees == 1
+        assert memoire.annuler_initialisation() == 1
+        assert memoire.en_attente() == ["C:/declaree.jpg"]
+        assert memoire.entrees["C:/reelle.jpg"].envoyee is True
+        assert memoire.nombre_initialisees == 0
+
+    def test_annulation_sans_rien_a_annuler(self, tmp_path):
+        memoire = _memoire(tmp_path)
+        memoire.enregistrer("C:/a.jpg", "NOM/a.jpg", 1)
+        memoire.marquer_envoyee("C:/a.jpg")
+        assert memoire.annuler_initialisation() == 0
+
+    def test_le_drapeau_est_persiste(self, tmp_path):
+        memoire = _memoire(tmp_path)
+        memoire.marquer_tout_envoye([("C:/a.jpg", "NOM/a.jpg", 1)])
+        assert _memoire(tmp_path).nombre_initialisees == 1
 
     def test_reinitialiser_vide_tout_et_supprime_le_fichier(self, tmp_path):
         memoire = _memoire(tmp_path)

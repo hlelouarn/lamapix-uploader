@@ -34,6 +34,9 @@ QLabel#titre {{
 QLabel#evenement {{ color: {JAUNE}; font-size: 15px; font-weight: 600; }}
 QLabel#source    {{ color: {TEXTE_DOUX}; font-size: 11px; }}
 QLabel#note      {{ color: {TEXTE_DOUX}; font-size: 12px; }}
+/* Déclaré envoyé sans preuve : ni vert (ce n'est pas acquis), ni rouge
+   (ce n'est pas une panne). Ambre, comme la pause. */
+QLabel#initialisees {{ color: {ORANGE}; font-size: 12px; }}
 QLabel#erreur    {{ color: {ROUGE}; font-size: 12px; }}
 QLabel#badgePause {{
     background: {ORANGE}; color: #111827;
@@ -84,7 +87,22 @@ QGroupBox {{
 }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px; color: {BLEU}; }}
 
-QCheckBox {{ spacing: 8px; }}
+/* Cases et puces : sans style explicite, le thème sombre de Windows les rend
+   quasi invisibles (gris foncé sur fond nuit). */
+QCheckBox, QRadioButton {{ spacing: 8px; }}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 15px; height: 15px;
+    border: 2px solid {SURFACE_HAUTE}; background: {FOND};
+}}
+QCheckBox::indicator {{ border-radius: 4px; }}
+QRadioButton::indicator {{ border-radius: 9px; }}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {BLEU}; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    background: {VERT}; border-color: {VERT};
+}}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    border-color: {SURFACE}; background: {SURFACE};
+}}
 QScrollBar:vertical {{ background: {FOND}; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {SURFACE_HAUTE}; border-radius: 5px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}

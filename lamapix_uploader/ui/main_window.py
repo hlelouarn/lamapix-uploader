@@ -31,6 +31,7 @@ from .. import NOM_APPLICATION, VERSION, paths
 from ..config import Config
 from ..engine import Etat, Moteur
 from . import theme
+from .init_dialog import DialogueInitialisation
 from .settings_dialog import DialogueReglages
 
 RAFRAICHISSEMENT_MS = 1000
@@ -116,6 +117,12 @@ class FenetrePrincipale(QMainWindow):
         self.etiquette_note.setWordWrap(True)
         racine.addWidget(self.etiquette_note)
 
+        self.etiquette_initialisees = QLabel()
+        self.etiquette_initialisees.setObjectName("initialisees")
+        self.etiquette_initialisees.setWordWrap(True)
+        self.etiquette_initialisees.hide()
+        racine.addWidget(self.etiquette_initialisees)
+
         self.etiquette_erreur = QLabel()
         self.etiquette_erreur.setObjectName("erreur")
         self.etiquette_erreur.setWordWrap(True)
@@ -194,9 +201,17 @@ class FenetrePrincipale(QMainWindow):
 
         bouton_init = QPushButton("Initialiser la mémoire")
         bouton_init.setToolTip(
-            "Marque toutes les photos présentes comme déjà envoyées, sans rien envoyer."
+            "Déclare les photos présentes comme déjà envoyées, sans rien envoyer."
         )
         bouton_init.clicked.connect(self._initialiser)
+
+        # N'apparaît que s'il y a quelque chose à annuler : sinon c'est du bruit.
+        self.bouton_annuler_init = QPushButton("Annuler l'initialisation")
+        self.bouton_annuler_init.setToolTip(
+            "Remet en file d'attente les photos déclarées envoyées sans l'avoir été."
+        )
+        self.bouton_annuler_init.clicked.connect(self._annuler_initialisation)
+        self.bouton_annuler_init.hide()
 
         bouton_reset = QPushButton("Réinitialiser (tout renvoyer)")
         bouton_reset.setObjectName("danger")
@@ -205,7 +220,13 @@ class FenetrePrincipale(QMainWindow):
         bouton_dossier = QPushButton("Ouvrir le dossier de l'outil")
         bouton_dossier.clicked.connect(self._ouvrir_dossier)
 
-        for bouton in (self.bouton_pause, bouton_init, bouton_reset, bouton_dossier):
+        for bouton in (
+            self.bouton_pause,
+            bouton_init,
+            self.bouton_annuler_init,
+            bouton_reset,
+            bouton_dossier,
+        ):
             ligne.addWidget(bouton)
         ligne.addStretch(1)
         return ligne
@@ -269,22 +290,33 @@ class FenetrePrincipale(QMainWindow):
     def _initialiser(self) -> None:
         if not self.config.evenement:
             return
-        reponse = QMessageBox.question(
-            self,
-            "Initialiser la mémoire",
-            "Marquer TOUTES les photos actuellement présentes comme déjà envoyées ?\n\n"
-            "Rien ne sera envoyé. Seules les photos qui arriveront ENSUITE partiront "
-            "sur Lamapix.\n\nÀ utiliser quand Kadra a déjà uploadé une partie de "
-            "l'événement.",
-        )
-        if reponse != QMessageBox.StandardButton.Yes:
+        dialogue = DialogueInitialisation(self.moteur, self)
+        if not dialogue.exec():
             return
-        nombre = self.moteur.initialiser_memoire()
+        nombre = self.moteur.initialiser_memoire(dialogue.frontiere())
         QMessageBox.information(
             self,
             "Initialisation",
-            f"{nombre} photo(s) marquée(s) comme déjà envoyée(s).\nRien n'a été envoyé.",
+            f"{nombre} photo(s) déclarée(s) déjà envoyée(s). Rien n'a été envoyé.\n\n"
+            "Si Kadra n'avait pas fini d'uploader, ces photos ne partiront jamais : "
+            "le bouton « Annuler l'initialisation » les remet en file d'attente.",
         )
+
+    def _annuler_initialisation(self) -> None:
+        initialisees = self.moteur.etat().initialisees
+        if not initialisees:
+            return
+        reponse = QMessageBox.question(
+            self,
+            "Annuler l'initialisation",
+            f"Remettre en file d'attente les {initialisees} photo(s) déclarées "
+            "envoyées sans l'avoir été ?\n\n"
+            "Elles partiront sur Lamapix. Si elles y sont déjà, elles y "
+            "apparaîtront en double.\n\n"
+            "Les photos réellement envoyées par l'outil ne sont pas concernées.",
+        )
+        if reponse == QMessageBox.StandardButton.Yes:
+            self.moteur.annuler_initialisation()
 
     def _reinitialiser(self) -> None:
         if not self.config.evenement:
@@ -361,6 +393,18 @@ class FenetrePrincipale(QMainWindow):
             + (f"     En cours : {etat.en_cours}" if etat.en_cours else "")
         )
         self.etiquette_note.setText(etat.note)
+
+        # Le compteur « passées » mélange envois réels et déclarations : on dit
+        # lesquelles ne reposent que sur la parole de l'opérateur.
+        self.bouton_annuler_init.setVisible(bool(etat.initialisees))
+        self.etiquette_initialisees.setVisible(bool(etat.initialisees))
+        self.etiquette_initialisees.setText(
+            f"Dont {etat.initialisees} photo(s) déclarées envoyées sans vérification "
+            "(initialisation) — non vérifiable côté Lamapix."
+            if etat.initialisees
+            else ""
+        )
+
         self.etiquette_erreur.setText(
             f"Dernière erreur : {etat.derniere_erreur}" if etat.derniere_erreur else ""
         )

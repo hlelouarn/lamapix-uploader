@@ -52,13 +52,36 @@ Il reproduit à l'identique l'arborescence attendue par Lamapix. Si l'outil ne
 peut plus rien envoyer, on glisse le contenu de `tampon\<EVENEMENT>\` dans
 FileZilla et on obtient exactement le même résultat.
 
-## Les trois boutons qui comptent
+## Les boutons qui comptent
 
 | Bouton | Effet |
 |---|---|
 | **Pause** | Suspend les envois. Le scan continue, rien n'est perdu. |
-| **Initialiser la mémoire** | Marque tout l'existant comme déjà envoyé, **sans rien envoyer**. À utiliser quand Kadra a déjà uploadé une partie de l'événement : ça pose la frontière. |
+| **Initialiser la mémoire** | Déclare l'existant comme déjà envoyé, **sans rien envoyer**. À utiliser quand Kadra a déjà uploadé une partie de l'événement. Lire l'encadré ci-dessous. |
+| **Annuler l'initialisation** | N'apparaît que s'il y a matière : remet en file les photos déclarées envoyées sans l'avoir été. Les envois réels ne bougent pas. |
 | **Réinitialiser** | Efface la mémoire : **tout repart** sur Lamapix. Avec confirmation. |
+
+### « Initialiser » est une déclaration, pas un constat
+
+C'est le seul geste de l'outil qui repose sur une croyance. **Rien ne permet de
+savoir ce que Lamapix a reçu** : il aspire les fichiers déposés, le dossier
+distant est vide la plupart du temps, et un listing qui ne montre rien ne
+distingue pas « jamais envoyé » de « envoyé puis ingéré ».
+
+Le bouton pose donc une **frontière dans le temps** : « tout ce qui est là, je
+le déclare parti ; ce qui arrivera ensuite, tu l'envoies ». Le pari est que
+Kadra avait fini d'uploader au moment du clic.
+
+**Si Kadra s'est arrêté en cours d'événement**, les photos produites mais jamais
+uploadées sont sur le disque. Les avaler d'un bloc les enterre : plus rien ne les
+enverra, sans erreur ni compteur rouge. D'où deux garde-fous :
+
+- la frontière est **choisie** — « seulement les photos antérieures à \<heure\> »,
+  avec le nombre exact affiché avant de valider ;
+- le geste est **annulable** — les photos déclarées restent marquées comme telles,
+  comptées à part dans la fenêtre (bandeau ambre), et un bouton les remet en file.
+
+Dans le doute, ne pas cliquer : on paie des doublons, mais on ne perd rien.
 
 Fermer la fenêtre **n'arrête pas les envois** : l'outil continue près de
 l'horloge. Pour l'arrêter vraiment : clic droit sur l'icône → *Quitter*.
@@ -118,7 +141,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-82 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+93 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
@@ -152,7 +175,7 @@ Le cœur ne connaît **ni Qt ni le réseau**, ce qui le rend testable :
 | `ftp.py` | Client FTPS explicite, MKD par niveaux, cache invalidable |
 | `engine.py` | Pipeline, parallélisme, reprises, cooldowns, purge |
 | `journal.py` / `config.py` / `secrets_win.py` / `paths.py` | Journal tournant, réglages, DPAPI, portabilité |
-| `ui/` | Fenêtre Qt, réglages, zone de notification |
+|  `ui/` | Fenêtre Qt, réglages, zone de notification |
 
 `engine._un_tour()` exécute un cycle complet **sans jamais dormir** : c'est le
 point d'entrée des tests.

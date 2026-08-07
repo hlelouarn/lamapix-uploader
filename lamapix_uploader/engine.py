@@ -41,6 +41,7 @@ class Etat:
     envoyees: int = 0
     en_attente: int = 0
     erreurs: int = 0
+    initialisees: int = 0   # déclarées envoyées, jamais réellement envoyées
     derniere_erreur: str = ""
     en_cours: str = ""
     note: str = ""
@@ -102,6 +103,7 @@ class Moteur:
         self._prochaine_liste = 0.0
         self._epreuves_signalees: set[str] = set()
         self._a_reprendre: str | None = None
+        self._dernier_scan: list[PhotoTrouvee] = []
 
     # ================================================================ cycle de vie
 
@@ -147,17 +149,48 @@ class Moteur:
         self._reveil.set()
         return etat
 
-    def initialiser_memoire(self) -> int:
-        """Marque tout l'existant comme déjà envoyé, SANS rien envoyer."""
+    def photos_connues(self) -> list[PhotoTrouvee]:
+        """Le dernier scan, tel quel. Sert aux aperçus de l'interface sans
+        relancer une lecture disque (coûteuse sur un partage réseau)."""
+        with self._verrou:
+            return list(self._dernier_scan)
+
+    def apercu_initialisation(self, avant: float | None = None) -> tuple[int, int]:
+        """(nombre concerné, nombre total présent) pour une frontière donnée.
+
+        `avant` est un timestamp : seules les photos modifiées avant lui seraient
+        marquées. None = toutes.
+        """
+        photos = self.photos_connues()
+        if avant is None:
+            return len(photos), len(photos)
+        return sum(1 for p in photos if p.modifie_le < avant), len(photos)
+
+    def initialiser_memoire(self, avant: float | None = None) -> int:
+        """Déclare l'existant comme déjà envoyé, SANS rien envoyer.
+
+        Ce n'est pas une constatation : Lamapix aspirant ce qu'on y dépose, aucune
+        vérification n'est possible côté serveur. C'est le pari « Kadra avait fini
+        d'uploader ». `avant` permet de poser la frontière à l'heure où Kadra s'est
+        réellement arrêté plutôt que d'avaler tout le dossier ; et
+        `annuler_initialisation()` permet d'en revenir.
+        """
         with self._verrou:
             memoire = self._memoire
             source = self._dossier_source
         if memoire is None or source is None:
             return 0
 
+        # On repart du dernier scan quand il existe : l'aperçu montré à
+        # l'utilisateur et ce qu'on marque portent alors sur exactement le
+        # même ensemble de photos.
+        photos_sources = self.photos_connues() or self._scanner(source)
+
         photos = []
         rels = dict(memoire.rels_utilises)
-        for photo in self._scanner(source):
+        for photo in photos_sources:
+            if avant is not None and photo.modifie_le >= avant:
+                continue
             rel = chemin_distant(photo.relatif)
             if rel is None:
                 continue
@@ -167,10 +200,28 @@ class Moteur:
 
         with self._verrou:
             nombre = memoire.marquer_tout_envoye(photos)
-        self.journal.ecrire(
-            f"Initialisation : {nombre} photo(s) existante(s) marquée(s) comme déjà "
-            "envoyée(s) — rien n'a été envoyé"
+        frontiere = (
+            "tout le dossier"
+            if avant is None
+            else f"photos antérieures au {datetime.fromtimestamp(avant):%d/%m/%Y %H:%M}"
         )
+        self.journal.ecrire(
+            f"Initialisation ({frontiere}) : {nombre} photo(s) déclarée(s) déjà "
+            "envoyée(s) — rien n'a été envoyé, geste annulable"
+        )
+        return nombre
+
+    def annuler_initialisation(self) -> int:
+        """Renvoie dans la file ce qu'une initialisation avait mis de côté."""
+        with self._verrou:
+            if self._memoire is None:
+                return 0
+            nombre = self._memoire.annuler_initialisation()
+        if nombre:
+            self.journal.ecrire(
+                f"Initialisation annulée : {nombre} photo(s) remise(s) en file d'attente"
+            )
+            self._reveil.set()
         return nombre
 
     def reinitialiser_memoire(self) -> None:
@@ -198,6 +249,7 @@ class Moteur:
             memoire = self._memoire
             envoyees = memoire.nombre_envoyees if memoire else 0
             en_attente = memoire.nombre_en_attente if memoire else 0
+            initialisees = memoire.nombre_initialisees if memoire else 0
             self._elaguer_debit()
             return Etat(
                 evenement=self.config.evenement,
@@ -207,6 +259,7 @@ class Moteur:
                 envoyees=envoyees,
                 en_attente=en_attente,
                 erreurs=len(self._erreurs),
+                initialisees=initialisees,
                 derniere_erreur=self._derniere_erreur,
                 en_cours=self._en_cours,
                 note=self._note,
@@ -281,6 +334,7 @@ class Moteur:
         photos = self._scanner(source)
         with self._verrou:
             self._detectees = len(photos)
+            self._dernier_scan = photos
         tampon = self._dossier_tampon
         if tampon is None:
             return
@@ -620,6 +674,7 @@ class Moteur:
             self._pause_dossier.clear()
             self._echecs_dossier.clear()
             self._epreuves_signalees.clear()
+            self._dernier_scan = []
             self._detectees = 0
             self._derniere_erreur = ""
             connues = len(self._memoire.entrees)

@@ -31,6 +31,10 @@ class Entree:
     taille: int                   # sert à détecter une photo retouchée
     envoyee: bool = False
     envoyee_le: str | None = None  # ISO 8601
+    # « Envoyée » par déclaration de l'opérateur (bouton Initialiser), pas par un
+    # envoi réel. On le distingue pour pouvoir revenir en arrière : si Kadra
+    # n'avait pas fini d'uploader, ces photos-là sont un trou à combler.
+    initialisee: bool = False
 
 
 @dataclass
@@ -63,6 +67,7 @@ class MemoireEvenement:
                     taille=int(brut.get("size", 0)),
                     envoyee=bool(brut.get("sent", False)),
                     envoyee_le=brut.get("sentAt"),
+                    initialisee=bool(brut.get("init", False)),
                 )
             except (KeyError, TypeError, ValueError):
                 continue
@@ -82,6 +87,7 @@ class MemoireEvenement:
                     "size": e.taille,
                     "sent": e.envoyee,
                     "sentAt": e.envoyee_le,
+                    "init": e.initialisee,
                 }
                 for source, e in self.entrees.items()
             },
@@ -130,18 +136,55 @@ class MemoireEvenement:
 
         `photos` = liste de (source, rel, taille). Les entrées déjà connues ne sont
         pas touchées — on ne réécrit pas l'histoire d'un envoi réel.
+
+        Attention : c'est une DÉCLARATION de l'opérateur, pas une constatation.
+        Rien ne permet de savoir ce que Lamapix a réellement reçu (il aspire ce
+        qu'on y dépose). D'où le drapeau `initialisee`, qui rend le geste annulable
+        via `annuler_initialisation()`.
         """
         maintenant = datetime.now(timezone.utc).isoformat()
         nombre = 0
         for source, rel, taille in photos:
-            if source in self.entrees:
+            entree = self.entrees.get(source)
+            if entree is not None:
+                # Déjà partie (envoi réel ou déclaration antérieure) : on n'y touche
+                # pas. En attente, en revanche, c'est précisément ce qu'on avale —
+                # sinon le bouton ne marquerait plus rien dès le premier scan passé.
+                if entree.envoyee:
+                    continue
+                entree.envoyee = True
+                entree.envoyee_le = maintenant
+                entree.initialisee = True
+                nombre += 1
                 continue
             self.entrees[source] = Entree(
-                rel=rel, taille=taille, envoyee=True, envoyee_le=maintenant
+                rel=rel,
+                taille=taille,
+                envoyee=True,
+                envoyee_le=maintenant,
+                initialisee=True,
             )
             self.rels_utilises[rel] = source
             nombre += 1
         self.sauver()
+        return nombre
+
+    def annuler_initialisation(self) -> int:
+        """Remet en file d'attente les photos posées par « Initialiser ».
+
+        Le filet de sécurité du pari : si Kadra n'avait pas fini d'uploader, ces
+        photos étaient un trou silencieux. Les envois RÉELS ne sont pas touchés.
+        """
+        nombre = 0
+        for entree in self.entrees.values():
+            if not entree.initialisee:
+                continue
+            entree.envoyee = False
+            entree.envoyee_le = None
+            entree.initialisee = False
+            nombre += 1
+        if nombre:
+            self.sauver()
         return nombre
 
     def effacer(self) -> None:
@@ -163,6 +206,12 @@ class MemoireEvenement:
     @property
     def nombre_en_attente(self) -> int:
         return sum(1 for e in self.entrees.values() if not e.envoyee)
+
+    @property
+    def nombre_initialisees(self) -> int:
+        """Photos déclarées envoyées sans l'avoir été. Un envoi réel les efface
+        de ce compte : c'est ce qui reste sur la foi de l'opérateur seul."""
+        return sum(1 for e in self.entrees.values() if e.initialisee)
 
     def en_attente(self) -> list[str]:
         """Sources restant à envoyer, triées par chemin distant (envoi dossier
