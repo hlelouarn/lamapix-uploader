@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────
+# Lamapix Uploader
+# ─────────────────────────────────────────────
+
+# Environnement virtuel
+.venv/
+
+# Caches Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build PyInstaller
+build/
+dist/
+*.exe
+
+# Données d'exécution : config locale, MOT DE PASSE CHIFFRÉ, mémoire, tampon,
+# journaux. Rien de tout ça ne doit partir sur GitHub.
+donnees/
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Brief et script PowerShell d'origine : citent des noms de cavaliers réels et
+# la topologie réseau interne. Ils restent en local, hors du dépôt public.
+reference/
