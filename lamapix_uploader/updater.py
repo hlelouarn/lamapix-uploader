@@ -14,6 +14,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,12 +28,19 @@ ESSAIS_REMPLACEMENT = 30  # ~30 s d'attente que Windows relâche l'exe
 @dataclass
 class MiseAJour:
     version: str
-    url_exe: str
+    url_paquet: str
+    nom_paquet: str
     notes: str
 
     @property
     def plus_recente(self) -> bool:
         return _numeros(self.version) > _numeros(VERSION)
+
+    @property
+    def est_archive(self) -> bool:
+        """Depuis la 1.3.0 on publie un ZIP (build « onedir »). Les .exe des
+        versions antérieures restent gérés : un poste peut être en retard."""
+        return self.nom_paquet.lower().endswith(".zip")
 
 
 def _numeros(version: str) -> tuple[int, ...]:
@@ -60,34 +68,86 @@ def chercher(depot: str) -> MiseAJour | None:
     version = str(donnees.get("tag_name") or "").lstrip("vV")
     if not version:
         return None
-    url_exe = ""
+
+    # Le ZIP prime : c'est le format courant. Le .exe reste accepté en repli.
+    paquet: dict = {}
     for actif in donnees.get("assets") or []:
-        if str(actif.get("name", "")).lower().endswith(".exe"):
-            url_exe = actif.get("browser_download_url", "")
+        nom = str(actif.get("name", "")).lower()
+        if nom.endswith(".zip"):
+            paquet = actif
             break
-    if not url_exe:
+        if nom.endswith(".exe") and not paquet:
+            paquet = actif
+    if not paquet.get("browser_download_url"):
         return None
-    return MiseAJour(version=version, url_exe=url_exe, notes=str(donnees.get("body") or ""))
+
+    return MiseAJour(
+        version=version,
+        url_paquet=paquet["browser_download_url"],
+        nom_paquet=str(paquet.get("name", "")),
+        notes=str(donnees.get("body") or ""),
+    )
+
+
+def _trouver_exe(racine: Path) -> Path | None:
+    """L'exe dans une archive extraite, que le ZIP porte un dossier racine ou non."""
+    direct = racine / NOM_EXE
+    if direct.exists():
+        return direct
+    for trouve in racine.rglob(NOM_EXE):
+        return trouve
+    return None
 
 
 def telecharger(mise_a_jour: MiseAJour) -> Path:
-    """Télécharge le nouvel exe dans un dossier temporaire."""
-    destination = Path(tempfile.mkdtemp(prefix="lamapix_maj_")) / NOM_EXE
+    """Récupère la nouvelle version. Retourne le DOSSIER applicatif extrait
+    (ou l'exe seul, pour une release ancienne)."""
+    travail = Path(tempfile.mkdtemp(prefix="lamapix_maj_"))
+    archive = travail / (mise_a_jour.nom_paquet or NOM_EXE)
     requete = urllib.request.Request(
-        mise_a_jour.url_exe, headers={"User-Agent": "LamapixUploader"}
+        mise_a_jour.url_paquet, headers={"User-Agent": "LamapixUploader"}
     )
-    with urllib.request.urlopen(requete, timeout=60) as reponse:
-        destination.write_bytes(reponse.read())
-    return destination
+    with urllib.request.urlopen(requete, timeout=120) as reponse:
+        archive.write_bytes(reponse.read())
+
+    if not mise_a_jour.est_archive:
+        return archive
+
+    extrait = travail / "extrait"
+    with zipfile.ZipFile(archive) as zip_:
+        zip_.extractall(extrait)
+    exe = _trouver_exe(extrait)
+    if exe is None:
+        raise RuntimeError(f"{NOM_EXE} est introuvable dans l'archive téléchargée.")
+    return exe.parent
 
 
-def appliquer(nouvel_exe: Path) -> None:
-    """Écrit et lance le .bat de remplacement, puis rend la main (l'appelant quitte)."""
+def appliquer(source: Path) -> None:
+    """Écrit et lance le .bat de remplacement, puis rend la main (l'appelant quitte).
+
+    `source` est le dossier applicatif extrait (cas normal) ou un exe seul
+    (release antérieure à la 1.3.0).
+    """
     if not paths.est_gele():
         raise RuntimeError("La mise à jour automatique n'a de sens que sur l'exe.")
 
     exe_actuel = Path(sys.executable)
-    script = exe_actuel.parent / "_mise_a_jour.bat"
+    dossier_app = exe_actuel.parent
+    script = dossier_app / "_mise_a_jour.bat"
+
+    if source.is_dir():
+        # robocopy SANS /MIR : on écrase les fichiers de l'application et on ne
+        # supprime rien. `donnees\` — config, et surtout la mémoire des envois —
+        # doit survivre : la perdre ferait tout renvoyer sur Lamapix.
+        # Codes de retour robocopy : < 8 = succès.
+        remplacement = (
+            f'robocopy "{source}" "{dossier_app}" /E /R:1 /W:1 >nul\r\n'
+            "if %ERRORLEVEL% lss 8 goto lancer\r\n"
+        )
+    else:
+        remplacement = (
+            f'copy /Y "{source}" "{exe_actuel}" >nul 2>&1 && goto lancer\r\n'
+        )
     # Windows garde l'exe verrouillé quelques instants après la fermeture : on
     # réessaie, mais un nombre borné de fois. Une boucle infinie laisserait un
     # cmd.exe fantôme tourner pour toujours si la copie ne passait jamais
@@ -99,11 +159,11 @@ def appliquer(nouvel_exe: Path) -> None:
         "set /a essais=0\r\n"
         ":attendre\r\n"
         "timeout /t 1 /nobreak >nul\r\n"
-        f'copy /Y "{nouvel_exe}" "{exe_actuel}" >nul 2>&1 && goto lancer\r\n'
-        "set /a essais+=1\r\n"
+        + remplacement
+        + "set /a essais+=1\r\n"
         f"if %essais% lss {ESSAIS_REMPLACEMENT} goto attendre\r\n"
-        "echo Echec : impossible de remplacer l'executable.\r\n"
-        f'echo Le nouveau fichier reste disponible ici : {nouvel_exe}\r\n'
+        "echo Echec : impossible de remplacer l'application.\r\n"
+        f"echo La nouvelle version reste disponible ici : {source}\r\n"
         "pause\r\n"
         f'start "" "{exe_actuel}"\r\n'
         'del "%~f0"\r\n'

@@ -13,15 +13,21 @@ interne qui n'ont rien à faire dans un dépôt public.
 
 ## Installer sur un PC (utilisateur)
 
-1. Copier **`LamapixUploader.exe`** où vous voulez (Bureau, `C:\Outils\`, une clé…).
-2. Double-cliquer. Au premier lancement, il demande le **dossier des événements
+1. Télécharger `LamapixUploader-vX.Y.Z.zip` depuis la
+   [dernière release](https://github.com/hlelouarn/lamapix-uploader/releases/latest).
+2. **Extraire le dossier** où vous voulez (`C:\Outils\`, une clé…) — pas besoin de
+   droits administrateur. Faire un raccourci vers `LamapixUploader.exe` si utile.
+3. Double-cliquer. Au premier lancement, il demande le **dossier des événements
    Kadra**, puis l'**identifiant et le mot de passe Lamapix**. Le mot de passe est
    mémorisé **chiffré** sur cette machine (DPAPI), jamais en clair.
-3. Choisir l'événement à surveiller, puis laisser tourner.
+4. Choisir l'événement à surveiller, puis laisser tourner.
+
+> **Garder le dossier entier.** L'exe seul ne démarre pas : les bibliothèques Qt
+> vivent à côté de lui, dans `_internal\`.
 
 ### Déployer sur les autres PC sans tout retaper
 
-Configurer **un** poste, puis copier `LamapixUploader.exe` **et**
+Configurer **un** poste, puis copier le dossier **avec** son
 `donnees\config.json` sur les suivants : hôte, identifiant, dossier Kadra et
 réglages arrivent déjà remplis. Seul le mot de passe est redemandé — DPAPI le
 rend volontairement illisible sur une autre machine.
@@ -29,17 +35,19 @@ rend volontairement illisible sur une autre machine.
 Rien de tout cela n'est en dur dans l'exécutable : le dépôt étant public, il ne
 contient **ni identifiant, ni nom de serveur interne, ni secret**.
 
-Pas d'installation, pas de droits administrateur. L'outil crée un dossier
-**`donnees\`** à côté de l'exe :
+Pas d'installation, pas de droits administrateur. L'outil crée son sous-dossier
+`donnees\` au premier lancement :
 
 ```
-LamapixUploader.exe
-donnees\
-├── config.json         réglages de ce PC
-├── motdepasse.bin      mot de passe chiffré (illisible ailleurs)
-├── tampon\<EVENEMENT>\ copie locale, structurée EXACTEMENT comme le FTP
-│   └── _memoire.json   ce qui est parti, et quand
-└── journaux\           journal horodaté, avec rotation
+LamapixUploader\
+├── LamapixUploader.exe
+├── _internal\               bibliothèques Qt — ne pas séparer de l'exe
+└── donnees\
+    ├── config.json          réglages de ce PC
+    ├── motdepasse.bin       mot de passe chiffré (illisible ailleurs)
+    ├── tampon\<EVENEMENT>\  copie locale, structurée EXACTEMENT comme le FTP
+    │   └── _memoire.json    ce qui est parti, et quand
+    └── journaux\            journal horodaté, avec rotation
 ```
 
 > **Un événement = une machine = un chemin.** La mémoire est locale et liée au
@@ -96,6 +104,33 @@ répond toujours quelque chose, y compris « vous êtes à jour ».
 
 Hors ligne, la vérification échoue en silence et n'empêche rien.
 
+## Si un antivirus supprime l'outil
+
+Ça arrive avec tout exécutable Python non signé. Deux précautions sont déjà
+prises côté build :
+
+- **livraison en dossier, pas en fichier unique.** Un exe PyInstaller « onefile »
+  se décompresse dans `%TEMP%` à chaque lancement puis exécute le résultat —
+  comportement d'un *dropper*, que les heuristiques (`Wacatac`, `Sabsik`,
+  `Zusy`…) suppriment régulièrement. Le build « onedir » évite ce schéma ;
+- **pas de compression UPX**, qui aggrave nettement le problème.
+
+Il reste que le binaire n'est **pas signé**. Si un poste le supprime malgré
+tout :
+
+1. identifier la détection, sur le poste concerné :
+   `Get-MpThreat | Select-Object ThreatName, IsActive` ;
+2. si le nom se termine par `!ml` ou contient `Wacatac`/`Sabsik`, c'est une
+   heuristique générique — donc un faux positif. Le signaler à Microsoft
+   (<https://www.microsoft.com/en-us/wdsi/filesubmission>) le corrige pour tout
+   le monde en quelques jours ;
+3. en attendant, exclure le dossier, **en administrateur** :
+   `Add-MpPreference -ExclusionPath "C:\Outils\LamapixUploader"`.
+
+Le remède définitif serait un **certificat de signature de code** (~200-500 €/an,
+HSM obligatoire depuis 2023) : il supprime aussi l'avertissement SmartScreen au
+téléchargement. Non fait à ce jour.
+
 ---
 
 ## Ce que fait l'outil, dans l'ordre
@@ -151,7 +186,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-106 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+112 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
@@ -165,7 +200,7 @@ ne touche le vrai serveur.
 ### Construire l'exe
 
 ```powershell
-.\packaging\construire.ps1            # tests + icône + PyInstaller → dist\
+.\packaging\construire.ps1            # tests + icône + PyInstaller + ZIP → dist\
 .\packaging\construire.ps1 -Publier   # + release GitHub (updater)
 ```
 
