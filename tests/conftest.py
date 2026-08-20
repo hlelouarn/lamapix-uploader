@@ -12,7 +12,7 @@ import pytest
 from lamapix_uploader import paths
 from lamapix_uploader.config import Config
 from lamapix_uploader.engine import Moteur
-from lamapix_uploader.ftp import ErreurFtp, ErreurIdentifiants
+from lamapix_uploader.ftp import ErreurFragmentBloquant, ErreurFtp, ErreurIdentifiants
 from lamapix_uploader.journal import Journal
 
 
@@ -33,6 +33,16 @@ class FauxLamapix:
         self.identifiants_invalides = False
         self.stors: list[str] = []
         self.connexions = 0
+        # HiddenStores de ProFTPD : un envoi coupé laisse un `.in.<nom>.` qui
+        # bloque ensuite la photo en 550, pour toujours.
+        self.hidden_stores = False
+        self.fragments: set[str] = set()
+        self.supprimes: list[str] = []
+
+    @staticmethod
+    def fragment_de(chemin_absolu: str) -> str:
+        cible = PurePosixPath(chemin_absolu)
+        return f"{cible.parent}/.in.{cible.name}."
 
     def consommer(self, prefixe: str = "") -> None:
         """Ce que fait Lamapix : il ingère et fait disparaître ce qui est déposé."""
@@ -102,16 +112,43 @@ class ClientFauxLamapix:
         # Tout est indexé en chemin absolu côté serveur (racine événement comprise) :
         # c'est ce que les tests observent, et ce que Lamapix voit réellement.
         absolu = self._absolu(rel_distant)
+        fragment = self.serveur.fragment_de(absolu)
         with self.serveur.verrou:
             self.serveur.stors.append(absolu)
+
+            # Le fragment d'un envoi précédent bloque celui-ci, comme en vrai.
+            if fragment in self.serveur.fragments:
+                raise ErreurFragmentBloquant(
+                    f"550 {absolu} : un fichier caché temporaire "
+                    f"« {fragment} » existe déjà",
+                    fragment,
+                )
+
             restants = self.serveur.echecs_pour.get(absolu, 0)
             if restants > 0:
                 self.serveur.echecs_pour[absolu] = restants - 1
                 self._connecte = False  # le serveur a coupé : comme en vrai
+                if self.serveur.hidden_stores:
+                    # Transfert interrompu : le fichier caché reste derrière.
+                    self.serveur.fragments.add(fragment)
                 raise ErreurFtp("550 Requested action not taken")
             if self._absolu(dossier) not in self.serveur.dossiers:
                 raise ErreurFtp("550 Directory not found")
             self.serveur.fichiers[absolu] = fichier_local.read_bytes()
+            self.serveur.fragments.discard(fragment)   # renommé par le serveur
+
+    def supprimer_fragment(self, chemin: str) -> None:
+        """Le vrai client refuse tout ce qui n'est pas un fragment : on rejoue
+        ce garde-fou ici, pour qu'un test le vérifie réellement."""
+        nom = PurePosixPath(chemin).name
+        if not chemin.startswith(f"{self.racine}/") or not nom.startswith("."):
+            raise ErreurFtp(f"refus de supprimer « {chemin} »")
+        self._connecter()
+        with self.serveur.verrou:
+            if chemin not in self.serveur.fragments:
+                raise ErreurFtp("550 fichier introuvable")
+            self.serveur.fragments.discard(chemin)
+            self.serveur.supprimes.append(chemin)
 
 
 @pytest.fixture

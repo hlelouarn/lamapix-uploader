@@ -20,7 +20,7 @@ from typing import Callable
 
 from . import paths
 from .config import Config
-from .ftp import ClientFtps, ErreurFtp, ErreurIdentifiants
+from .ftp import ClientFtps, ErreurFragmentBloquant, ErreurFtp, ErreurIdentifiants
 from .journal import Journal
 from .mapping import chemin_distant, rendre_unique
 from .memory import MemoireEvenement
@@ -585,6 +585,20 @@ class Moteur:
                 self.journal.erreur(f"identifiants refusés par Lamapix : {exc}")
                 self._noter_erreur("Identifiants refusés (530) — vérifiez le mot de passe.")
                 return False
+            except ErreurFragmentBloquant as exc:
+                # Sans ce nettoyage, la photo est perdue pour toujours : le serveur
+                # refusera tous les envois suivants, y compris aux prochains scans.
+                derniere = str(exc)
+                self.journal.ecrire(
+                    f"Envoi interrompu détecté sur {rel} — nettoyage du fragment "
+                    f"« {exc.fragment} »"
+                )
+                try:
+                    client.supprimer_fragment(exc.fragment)
+                except ErreurFtp as echec:
+                    self.journal.erreur(f"fragment non supprimable — {rel} : {echec}")
+                if essai < self.config.essais_max and not self._arret.is_set():
+                    time.sleep(PAUSE_ENTRE_ESSAIS)
             except ErreurFtp as exc:
                 derniere = str(exc)
                 self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")
@@ -617,6 +631,7 @@ class Moteur:
             self._dernier_envoi = maintenant
             self._envois_recents.append(time.monotonic())
             self._elaguer_debit()
+            self._note = f"Envoi en cours — {memoire.nombre_en_attente} photo(s) en attente…"
         self.journal.succes(rel)
 
     def _noter_echec(self, rel: str, parent: str, message: str) -> None:

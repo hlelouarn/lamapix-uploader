@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import PurePosixPath
 
 import pytest
 
@@ -477,3 +478,59 @@ class TestSourceInjoignable:
 
         assert moteur._un_tour() == 5.0
         assert "introuvable" in moteur.etat().note
+
+
+class TestFragmentsInterrompus:
+    """ProFTPD écrit dans `.in.<nom>.` puis renomme. Un envoi coupé laisse ce
+    fragment, et le serveur refuse ensuite la photo en 550 — pour toujours."""
+
+    def test_sans_nettoyage_la_photo_serait_perdue(self, source, serveur, fabrique_moteur):
+        """Le scénario vu en production : 3 essais, 3 refus, et ça ne guérit jamais."""
+        rel = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.hidden_stores = True
+        serveur.echecs_pour[rel] = 1        # la coupure qui crée le fragment
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+
+        assert rel in serveur.fichiers
+        assert serveur.supprimes == [serveur.fragment_de(rel)]
+        assert not serveur.fragments      # le serveur est laissé propre
+
+    def test_un_fragment_deja_present_est_nettoye(self, source, serveur, fabrique_moteur):
+        """Le cas du redémarrage : le fragment date d'une session précédente."""
+        rel = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.fragments.add(serveur.fragment_de(rel))
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+
+        assert rel in serveur.fichiers
+        assert moteur.etat().en_attente == 0
+
+    def test_les_autres_photos_ne_sont_pas_ralenties(self, source, serveur, fabrique_moteur):
+        rel_a = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.fragments.add(serveur.fragment_de(rel_a))
+        poser_photo(source, PHOTO_A)
+        poser_photo(source, PHOTO_B)
+        poser_photo(source, PHOTO_C)
+
+        fabrique_moteur(source)._un_tour()
+
+        assert len(deposes(serveur)) == 3
+        assert len(serveur.supprimes) == 1   # on n'efface que ce qui bloquait
+
+    def test_aucune_photo_nest_jamais_supprimee(self, source, serveur, fabrique_moteur):
+        """La règle du brief tient : seuls les fragments sont effaçables."""
+        rel = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.fragments.add(serveur.fragment_de(rel))
+        poser_photo(source, PHOTO_A)
+
+        fabrique_moteur(source)._un_tour()
+
+        assert all(
+            PurePosixPath(chemin).name.startswith(".in.")
+            for chemin in serveur.supprimes
+        )

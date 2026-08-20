@@ -167,7 +167,37 @@ ingestion. Un FTP vide ne prouve donc rien. Conséquences, toutes implémentées
 - 3 tentatives par photo, puis mise en attente 4 min et **la file continue** :
   un fichier en erreur ne bloque jamais les autres. 3 échecs d'affilée dans un
   dossier → tout le dossier attend 4 min ;
-- **rien n'est jamais supprimé côté FTP**.
+- **aucune photo, aucun dossier n'est jamais supprimé côté FTP.** Une seule
+  exception, détaillée ci-dessous : les fragments d'envois interrompus.
+
+### Les fragments d'envois interrompus
+
+Lamapix tourne sous ProFTPD avec `HiddenStores` : un dépôt s'écrit d'abord dans
+`.in.<nom>.`, puis le serveur le renomme une fois complet. Si la connexion tombe
+en plein transfert, ce fragment reste — et **tous les envois suivants de cette
+photo échouent en 550**, indéfiniment :
+
+```
+550 /<EVENEMENT>/<NOM>_<CHEVAL>/<photo>.jpg : un fichier caché temporaire
+« /<EVENEMENT>/<NOM>_<CHEVAL>/.in.<photo>.jpg. » existe déjà
+```
+
+Aucune reprise ne peut aboutir tant qu'il est là : la photo serait perdue pour
+de bon. L'outil supprime donc ce fragment, puis réessaie. C'est le résidu d'un
+de nos propres envois, jamais une donnée de vente.
+
+Trois garde-fous, parce qu'une réponse serveur est une donnée et pas un ordre :
+
+- le déclencheur est étroit — un 550 mentionnant *à la fois* un fichier
+  caché/temporaire et son existence ; un 550 banal ne supprime rien ;
+- le chemin dicté par le serveur n'est retenu que s'il est **sous la racine de
+  l'événement**, **porte un nom caché** et **contient le nom de la photo en
+  cours d'envoi** ; sinon on retombe sur le nom reconstruit ;
+- avant l'envoi de la commande, `supprimer_fragment()` revérifie ces conditions
+  pour son propre compte. Un chemin de photo, de dossier ou d'un autre événement
+  est refusé.
+
+Chaque suppression est écrite au journal.
 
 ---
 
@@ -186,7 +216,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-112 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+129 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
