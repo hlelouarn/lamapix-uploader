@@ -43,10 +43,11 @@ class Config:
     # de satellite en Starlink, passage sous un pont en 4G…).
     timeout_connexion: int = 30
     # Délai SANS AUCUN octet échangé : un transfert vivant, même lent, avance en
-    # permanence. Le diagnostic terrain (Starlink) a montré des sockets mortes
-    # attendues 20 à 45 s alors qu'une photo part en 0,6 s : abandonner à 12 s
-    # et relancer (≈ 3 s) est toujours gagnant.
-    timeout_donnees: int = 12
+    # permanence. Deux diagnostics terrain (Starlink) l'ont calibré : le pire
+    # transfert SAIN observé a mis 4,6 s, une photo part en 0,6 s, et chaque
+    # socket morte gèle un ouvrier tout le délai. 8 s = marge ×1,7 sur le pire
+    # cas sain, et ~5 s de gagnées par coupure par rapport à 12 s.
+    timeout_donnees: int = 8
     pause_apres_echec: int = 240          # PLAFOND de mise en attente (fichier/dossier)
     echecs_avant_pause_dossier: int = 3
     rescan_max: int = 300                 # on recoupe la file pour re-scanner
@@ -87,7 +88,7 @@ class Config:
         # satellite »). Le diagnostic a prouvé le contraire : chaque valeur
         # héritée fait perdre ~20 s par coupure. On ne touche pas aux valeurs
         # réellement choisies par l'utilisateur (autres que ces trois-là).
-        if config.timeout_donnees in (60, 180, 300):
+        if config.timeout_donnees in (12, 60, 180, 300):
             config.timeout_donnees = cls().timeout_donnees
         return config
 

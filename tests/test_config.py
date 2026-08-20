@@ -14,14 +14,14 @@ from lamapix_uploader.config import Config
 
 
 class TestMigrationTimeoutDonnees:
-    @pytest.mark.parametrize("herite", [60, 180, 300])
+    @pytest.mark.parametrize("herite", [12, 60, 180, 300])
     def test_les_anciens_defauts_sont_rattrapes(self, tmp_path, herite):
         fichier = tmp_path / "config.json"
         Config(ftp_utilisateur="x", timeout_donnees=herite).sauver(fichier)
 
         assert Config.charger(fichier).timeout_donnees == Config().timeout_donnees
 
-    @pytest.mark.parametrize("choisi", [5, 12, 20, 45, 90])
+    @pytest.mark.parametrize("choisi", [5, 8, 20, 45, 90])
     def test_un_choix_delibere_est_respecte(self, tmp_path, choisi):
         fichier = tmp_path / "config.json"
         Config(ftp_utilisateur="x", timeout_donnees=choisi).sauver(fichier)
@@ -46,7 +46,7 @@ class TestMigrationTimeoutDonnees:
 class TestAllerRetour:
     def test_fichier_absent_donne_les_defauts(self, tmp_path):
         config = Config.charger(tmp_path / "absent.json")
-        assert config.timeout_donnees == 12
+        assert config.timeout_donnees == 8
         assert config.ftp_utilisateur == ""
 
     def test_json_corrompu_donne_les_defauts(self, tmp_path):

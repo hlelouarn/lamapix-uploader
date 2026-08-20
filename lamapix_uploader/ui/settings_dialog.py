@@ -165,10 +165,10 @@ class DialogueReglages(QDialog):
         formulaire.addRow(
             "",
             self._aide(
-                "Délai sans AUCUN octet échangé. 12 s suffisent : une photo part "
-                "en moins d'une seconde, un transfert figé plus longtemps est "
-                "mort — l'abandonner tôt et le relancer va plus vite que "
-                "d'attendre. Ne pas augmenter sur liaison satellite."
+                "Délai sans AUCUN octet échangé. 8 s suffisent : le pire "
+                "transfert sain observé a mis 4,6 s, et chaque socket morte "
+                "gèle un envoi pendant tout ce délai. Ne pas augmenter sur "
+                "liaison satellite."
             ),
         )
 
