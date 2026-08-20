@@ -113,9 +113,12 @@ panne qui n'existe pas :
 | GitHub répond, rien d'installable | « aucune version installable par cette version de l'outil » — typiquement un poste resté sur une version antérieure à la 1.3.0, qui ne sait lire que les assets `.exe` |
 | Déjà à jour | « Vous êtes à jour » |
 
-**Certificats.** L'outil essaie d'abord le magasin de Windows (qui connaît les
-racines installées par l'entreprise, donc les proxys filtrant le HTTPS), puis un
-jeu de racines **embarqué**. Windows ne livre qu'un petit socle et télécharge les
+**Certificats.** Pour la mise à jour **comme pour le FTPS Lamapix**, l'outil
+essaie d'abord le magasin de Windows (qui connaît les racines installées par
+l'entreprise, donc les proxys filtrant le HTTPS), puis un jeu de racines
+**embarqué**. La case « ignorer les erreurs de certificat » ne devrait donc
+plus jamais être nécessaire sur un PC au magasin incomplet : décochez-la et
+refaites « Tester la connexion ». Windows ne livre qu'un petit socle et télécharge les
 autres à la demande : sur un réseau de concours filtré, la racine Sectigo
 d'`api.github.com` peut manquer alors que Lamapix (Let's Encrypt) passe très bien
 sur le même PC. La vérification n'est **jamais** désactivée — cette connexion sert
@@ -228,11 +231,19 @@ timed out`. Le piège est que **toutes** les photos échouent en même temps.
   1 min, puis 4 min (plafond réglable) — et non 4 minutes d'emblée. Une mise à
   l'écart forfaitaire vidait la file et figeait l'outil quatre minutes pour une
   coupure de trois secondes. Un envoi réussi efface l'ardoise.
-- **Une coupure n'est pas un refus.** Un délai dépassé ou un `10054` signalent
-  que le *lien* est tombé, pas que la photo pose problème. Insister aussitôt sur
-  la même photo regèlerait un ouvrier pour tout le délai de transfert : on
-  l'écarte 15 s et on passe à la suivante. Un vrai refus du serveur (550), lui,
-  garde ses trois tentatives.
+- **La session morte est jetée immédiatement.** Après un `10054` ou un délai
+  dépassé, la connexion est fermée et la suivante repart sur du neuf — jamais
+  sur le cadavre de la précédente. (C'était le bug qui a fait tomber le débit
+  de 90 à 5 photos/min : chaque photo venait mourir sur la même socket morte.)
+- **Un disjoncteur global.** Une coupure n'est pas un refus : après 2 pannes de
+  lien consécutives, plus personne ne consomme la file — une seule sonde
+  réessaie (2 s, 5 s, 10 s, 20 s, 30 s max) et le premier succès rouvre tout.
+  Pendant la coupure, **aucun compteur d'échec ne bouge** : au retour du lien,
+  le débit repart immédiatement à pleine vitesse. Un vrai refus du serveur
+  (550), lui, garde ses trois tentatives et ses mises à l'écart.
+- **Une photo qui fait tomber le lien à elle seule** (5 fois de suite) passe en
+  échec normal : elle ne monopolise pas la sonde pendant que les autres
+  attendent.
 - **Deux délais distincts** : ouvrir une connexion doit rester rapide (30 s) ;
   le délai de transfert (60 s) est un délai **sans aucun octet échangé** — un
   transfert vivant, même lent, avance en permanence. Le monter très haut est
@@ -267,7 +278,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-156 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+159 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

@@ -129,3 +129,30 @@ class TestClassementDesPannes:
         from lamapix_uploader.ftp import _est_panne_de_lien
 
         assert _est_panne_de_lien(exception) is False
+
+
+class TestSessionJeteeApresPanne:
+    """LE bug du terrain : après un 10054, la session restait en place et
+    `connecter()` la croyait valide — chaque photo suivante venait mourir sur le
+    même cadavre de socket, jusqu'à 60 s perdues par photo, sans reconnexion."""
+
+    class _FauxFtp:
+        sock = None
+
+        def close(self):
+            self.ferme = True
+
+    def test_une_panne_de_lien_jette_la_session(self, client):
+        from lamapix_uploader.ftp import ErreurLiaison
+
+        client._ftp = self._FauxFtp()
+        with pytest.raises(ErreurLiaison):
+            client._echec(ConnectionResetError("[WinError 10054]"))
+        assert client._ftp is None   # la prochaine photo repartira sur du neuf
+
+    def test_un_refus_du_serveur_garde_la_session(self, client):
+        faux = self._FauxFtp()
+        client._ftp = faux
+        with pytest.raises(ErreurFtp):
+            client._echec(Exception("550 Permission denied"))
+        assert client._ftp is faux   # la connexion est saine, on la garde

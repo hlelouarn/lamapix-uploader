@@ -108,7 +108,13 @@ class DialogueReglages(QDialog):
         )
 
         self.case_certificat = QCheckBox(
-            "Ignorer les erreurs de certificat TLS (à n'activer qu'en cas de blocage)"
+            "Ignorer les erreurs de certificat TLS (dernier recours — désactive "
+            "toute vérification)"
+        )
+        self.case_certificat.setToolTip(
+            "Normalement inutile : l'outil embarque son propre jeu de racines et "
+            "l'essaie quand celui de Windows est incomplet. Décochez, testez la "
+            "connexion, et ne recochez que si le test échoue encore."
         )
         self.case_certificat.setChecked(self.config.ignorer_certificat)
         formulaire.addRow("", self.case_certificat)

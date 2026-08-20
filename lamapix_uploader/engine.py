@@ -39,6 +39,16 @@ DELAIS_ENTRE_ESSAIS = (3.0, 10.0, 20.0)
 DELAIS_REPRISE = (15, 60, 240)
 INTERVALLE_PURGE_MINUTES = 10
 
+# Disjoncteur de liaison. Quand le LIEN tombe (Starlink qui change de satellite,
+# 4G qui décroche), toutes les photos échoueraient une par une : au lieu de ça,
+# après SEUIL pannes consécutives on cesse de consommer la file, une seule sonde
+# réessaie à intervalles courts, et le premier succès rouvre tout.
+SEUIL_LIAISON_COUPEE = 2
+DELAIS_SONDE = (2.0, 5.0, 10.0, 20.0, 30.0)
+# Une photo qui provoque N pannes de lien à elle seule est traitée en échec
+# normal : sans ce garde-fou, une photo pathologique monopoliserait la sonde.
+MAX_LIAISONS_PAR_PHOTO = 5
+
 
 @dataclass
 class Etat:
@@ -108,6 +118,10 @@ class Moteur:
         self._echecs_dossier: dict[str, int] = {}
         self._echecs_fichier: dict[str, int] = {}
         self._echecs_dossier_suite: dict[str, int] = {}
+        self._liaisons_fichier: dict[str, int] = {}
+        self._pannes_liaison = 0        # consécutives, toutes photos confondues
+        self._prochaine_sonde = 0.0
+        self._sonde_prise = False
         self._envois_recents: deque[float] = deque()
         self._dernier_envoi: datetime | None = None
         self._prochaine_purge = 0.0
@@ -481,30 +495,58 @@ class Moteur:
         verrou_file = threading.Lock()
 
         def prochaine() -> str | None:
-            """Sert la file en sautant ce qui est en cooldown (sans jamais bloquer)."""
-            with verrou_file:
-                maintenant = time.monotonic()
-                reportees: list[str] = []
-                choisie = None
-                while file:
-                    source = file.popleft()
+            """Sert la file. Liaison coupée : une seule sonde à la fois."""
+            while not self._arret.is_set() and not self._en_pause:
+                if time.monotonic() > echeance:
+                    return None
+                with self._verrou:
+                    coupee = self._pannes_liaison >= SEUIL_LIAISON_COUPEE
+                    if coupee:
+                        if self._sonde_prise or time.monotonic() < self._prochaine_sonde:
+                            patienter = True
+                        else:
+                            self._sonde_prise = True  # cet ouvrier porte la sonde
+                            patienter = False
+                    else:
+                        patienter = False
+                if patienter:
+                    # Les autres ouvriers attendent le verdict de la sonde au
+                    # lieu d'aller chacun mourir sur la liaison coupée.
+                    time.sleep(0.25)
+                    continue
+                with verrou_file:
+                    maintenant = time.monotonic()
+                    reportees: list[str] = []
+                    choisie = None
+                    while file:
+                        source = file.popleft()
+                        with self._verrou:
+                            entree = memoire.entrees.get(source)
+                        if entree is None or entree.envoyee:
+                            continue
+                        if self._en_cooldown(entree.rel, maintenant):
+                            reportees.append(source)
+                            continue
+                        choisie = source
+                        break
+                    file.extend(reportees)  # réexaminées au prochain appel
+                if choisie is None:
                     with self._verrou:
-                        entree = memoire.entrees.get(source)
-                    if entree is None or entree.envoyee:
-                        continue
-                    if self._en_cooldown(entree.rel, maintenant):
-                        reportees.append(source)
-                        continue
-                    choisie = source
-                    break
-                file.extend(reportees)  # réexaminées au prochain tour de boucle
+                        self._sonde_prise = False
+                    return None
                 return choisie
+            return None
+
+        def remettre(source: str) -> None:
+            """Photo victime du lien : elle repart EN TÊTE, la sonde la retente."""
+            with verrou_file:
+                file.appendleft(source)
 
         nombre = max(1, min(3, self.config.connexions_paralleles))
         travailleurs = [
             threading.Thread(
                 target=self._travailleur,
-                args=(memoire, prochaine, mot_de_passe, echeance),
+                args=(memoire, prochaine, remettre, mot_de_passe, echeance),
                 name=f"envoi-{index + 1}",
                 daemon=True,
             )
@@ -529,6 +571,7 @@ class Moteur:
         self,
         memoire: MemoireEvenement,
         prochaine: Callable[[], str | None],
+        remettre: Callable[[str], None],
         mot_de_passe: str,
         echeance: float,
     ) -> None:
@@ -541,9 +584,13 @@ class Moteur:
                 source = prochaine()
                 if source is None:
                     break
-                if not self._envoyer_une(client, memoire, source):
-                    if self._identifiants_refuses:
-                        break
+                statut = self._envoyer_une(client, memoire, source)
+                with self._verrou:
+                    self._sonde_prise = False
+                if statut == "liaison":
+                    remettre(source)  # rien à reprocher à la photo : elle repassera
+                elif self._identifiants_refuses:
+                    break
         finally:
             client.fermer()
 
@@ -561,20 +608,25 @@ class Moteur:
 
     def _envoyer_une(
         self, client: ClientFtps, memoire: MemoireEvenement, source: str
-    ) -> bool:
+    ) -> str:
+        """Tente une photo. Retourne "ok", "echec" ou "liaison".
+
+        "liaison" signifie : la photo n'a rien fait de mal, c'est le lien qui
+        est tombé — l'appelant la remet en tête de file, sans aucune pénalité.
+        """
         with self._verrou:
             entree = memoire.entrees.get(source)
         if entree is None or entree.envoyee:
-            return True
+            return "ok"
 
         rel = entree.rel
         tampon = self._dossier_tampon
         if tampon is None:
-            return False
+            return "echec"
         fichier = tampon / rel
         if not fichier.exists():
             # Tampon disparu : on le reconstituera au prochain scan.
-            return True
+            return "ok"
 
         parent = str(PurePosixPath(rel).parent)
         parent = "" if parent == "." else parent
@@ -592,13 +644,13 @@ class Moteur:
                     client.invalider_cache(parent)
                 client.envoyer(fichier, rel)
                 self._noter_succes(memoire, source, rel)
-                return True
+                return "ok"
             except ErreurIdentifiants as exc:
                 derniere = str(exc)
                 self._identifiants_refuses = True
                 self.journal.erreur(f"identifiants refusés par Lamapix : {exc}")
                 self._noter_erreur("Identifiants refusés (530) — vérifiez le mot de passe.")
-                return False
+                return "echec"
             except ErreurFragmentBloquant as exc:
                 # Sans ce nettoyage, la photo est perdue pour toujours : le serveur
                 # refusera tous les envois suivants, y compris aux prochains scans.
@@ -614,13 +666,13 @@ class Moteur:
                 if essai < self.config.essais_max and not self._arret.is_set():
                     time.sleep(self._attente_entre_essais(essai))
             except ErreurLiaison as exc:
-                # Ce n'est pas cette photo qui pose problème, c'est le lien. Une
-                # nouvelle tentative immédiate rebloquerait l'ouvrier pour tout
-                # le délai de transfert, pendant lequel la file n'avance plus.
-                # On l'écarte brièvement et on passe à la suivante.
-                derniere = str(exc)
-                self.journal.ecrire(f"Liaison interrompue — {rel} : {exc}")
-                break
+                # Le LIEN est tombé, pas la photo. Le client a déjà jeté sa
+                # session morte ; le disjoncteur prend le relais : la photo
+                # repart en tête de file, aucun compteur d'échec ne bouge.
+                if self._noter_liaison(rel, str(exc)):
+                    derniere = str(exc)
+                    break        # photo pathologique : échec normal
+                return "liaison"
             except ErreurFtp as exc:
                 derniere = str(exc)
                 self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")
@@ -628,7 +680,7 @@ class Moteur:
                     time.sleep(self._attente_entre_essais(essai))
 
         self._noter_echec(rel, parent, derniere)
-        return False
+        return "echec"
 
     # ------------------------------------------------------------- cooldowns
 
@@ -653,6 +705,10 @@ class Moteur:
             self._echecs_fichier.pop(rel, None)
             self._echecs_dossier[parent] = 0
             self._echecs_dossier_suite.pop(parent, None)
+            # La liaison répond : disjoncteur refermé, ardoise effacée.
+            self._pannes_liaison = 0
+            self._prochaine_sonde = 0.0
+            self._liaisons_fichier.pop(rel, None)
             self._dernier_envoi = maintenant
             self._envois_recents.append(time.monotonic())
             self._elaguer_debit()
@@ -674,6 +730,32 @@ class Moteur:
         """
         base = DELAIS_REPRISE[min(echecs, len(DELAIS_REPRISE)) - 1]
         return float(min(base, self.config.pause_apres_echec))
+
+    def _noter_liaison(self, rel: str, message: str) -> bool:
+        """Comptabilise une panne de LIEN. True si cette photo doit être
+        traitée en échec normal (elle seule fait tomber la liaison).
+
+        Aucun compteur d'échec fichier/dossier ne bouge ici : au retour du
+        lien, tout doit repartir à pleine vitesse immédiatement.
+        """
+        with self._verrou:
+            self._pannes_liaison += 1
+            self._liaisons_fichier[rel] = self._liaisons_fichier.get(rel, 0) + 1
+            pathologique = self._liaisons_fichier[rel] >= MAX_LIAISONS_PAR_PHOTO
+            rang = max(0, self._pannes_liaison - SEUIL_LIAISON_COUPEE)
+            delai = DELAIS_SONDE[min(rang, len(DELAIS_SONDE) - 1)]
+            self._prochaine_sonde = time.monotonic() + delai
+            self._derniere_erreur = f"{rel} : {message}"
+            self._en_cours = ""
+            if self._pannes_liaison >= SEUIL_LIAISON_COUPEE:
+                self._note = (
+                    f"Liaison interrompue — nouvelle tentative dans {int(delai)} s "
+                    "(reprise automatique dès que ça répond)…"
+                )
+            if pathologique:
+                self._liaisons_fichier.pop(rel, None)
+        self.journal.ecrire(f"Liaison interrompue — {rel} : {message}")
+        return pathologique
 
     def _noter_echec(self, rel: str, parent: str, message: str) -> None:
         """Un fichier en erreur ne doit JAMAIS bloquer les autres : on l'écarte
@@ -740,6 +822,10 @@ class Moteur:
             self._echecs_dossier.clear()
             self._echecs_fichier.clear()
             self._echecs_dossier_suite.clear()
+            self._liaisons_fichier.clear()
+            self._pannes_liaison = 0
+            self._prochaine_sonde = 0.0
+            self._sonde_prise = False
             self._epreuves_signalees.clear()
             self._dernier_scan = []
             self._detectees = 0

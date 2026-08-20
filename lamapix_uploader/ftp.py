@@ -89,10 +89,26 @@ _INDICES_EXISTE_DEJA = ("existe déjà", "already exists")
 _INDICES_FRAGMENT = (".in.", "caché", "cache", "hidden", "temporaire", "temporary")
 
 
-def _contexte_ssl(ignorer_certificat: bool) -> ssl.SSLContext:
+def _contextes_ssl(ignorer_certificat: bool) -> list[ssl.SSLContext]:
+    """Magasins de certificats essayés dans l'ordre, comme pour les mises à jour.
+
+    Les PC de terrain n'ont souvent qu'un socle de racines, sans accès réseau
+    pour le compléter : la vérification échoue alors que le certificat de
+    Lamapix est parfaitement valide — et l'utilisateur finit par cocher
+    « ignorer le certificat », qui désactive TOUTE vérification. Le magasin
+    embarqué (certifi) couvre ce cas proprement ; la case ne devrait plus
+    jamais être nécessaire pour ça.
+    """
     if ignorer_certificat:
-        return ssl._create_unverified_context()
-    return ssl.create_default_context()
+        return [ssl._create_unverified_context()]
+    contextes = [ssl.create_default_context()]
+    try:
+        import certifi
+
+        contextes.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    return contextes
 
 
 class ClientFtps:
@@ -129,7 +145,21 @@ class ClientFtps:
     def connecter(self) -> None:
         if self._ftp is not None:
             return
-        ftp = ftplib.FTP_TLS(context=_contexte_ssl(self.ignorer_certificat))
+        contextes = _contextes_ssl(self.ignorer_certificat)
+        for rang, contexte in enumerate(contextes):
+            try:
+                self._ftp = self._ouvrir_session(contexte)
+                return
+            except ssl.SSLCertVerificationError as exc:
+                # Racine absente du magasin courant : on essaie le suivant.
+                if rang == len(contextes) - 1:
+                    raise ErreurFtp(
+                        "le certificat de Lamapix n'a pas pu être vérifié sur ce "
+                        f"PC (magasin de racines incomplet ?) : {exc}"
+                    ) from exc
+
+    def _ouvrir_session(self, contexte: ssl.SSLContext) -> ftplib.FTP_TLS:
+        ftp = ftplib.FTP_TLS(context=contexte)
         ftp.encoding = "utf-8"
         try:
             ftp.connect(self.hote, self.port, timeout=self.timeout)
@@ -143,6 +173,10 @@ class ClientFtps:
             ftp.timeout = self.timeout_donnees
             if ftp.sock is not None:
                 ftp.sock.settimeout(self.timeout_donnees)
+        except ssl.SSLCertVerificationError:
+            # Remonte tel quel : connecter() essaie le magasin suivant.
+            self._fermer_silencieusement(ftp, poli=False)
+            raise
         except ftplib.error_perm as exc:
             self._fermer_silencieusement(ftp)
             if str(exc).startswith("530"):
@@ -154,7 +188,7 @@ class ClientFtps:
             if _est_panne_de_lien(exc):
                 raise ErreurLiaison(str(exc)) from exc
             raise ErreurFtp(str(exc)) from exc
-        self._ftp = ftp
+        return ftp
 
     def fermer(self, poli: bool = True) -> None:
         """`poli=False` : on ferme sans envoyer QUIT.
@@ -215,7 +249,20 @@ class ClientFtps:
         try:
             self._ftp.voidcmd("NOOP")
         except ftplib.all_errors as exc:  # type: ignore[misc]
-            raise ErreurFtp(str(exc)) from exc
+            self._echec(exc)
+
+    def _echec(self, exc: BaseException) -> None:
+        """Classe une erreur et, si la liaison est morte, jette la connexion.
+
+        C'était LE bug de la lenteur sur Starlink : après un 10054 ou un délai
+        dépassé, la session restait en place, `connecter()` la croyait valide,
+        et chaque photo suivante venait mourir sur le même cadavre de socket —
+        jusqu'à 60 s perdues par photo, sans qu'aucune reconnexion n'ait lieu.
+        """
+        if _est_panne_de_lien(exc):
+            self.fermer(poli=False)
+            raise ErreurLiaison(str(exc)) from exc
+        raise ErreurFtp(str(exc)) from exc
 
     def _chemin_absolu(self, rel: str) -> str:
         return "/" + str(PurePosixPath(self.racine, rel)) if rel else "/" + self.racine
@@ -244,7 +291,7 @@ class ClientFtps:
             except ftplib.error_perm:
                 pass  # existe déjà : le cas nominal
             except ftplib.all_errors as exc:  # type: ignore[misc]
-                raise ErreurFtp(str(exc)) from exc
+                self._echec(exc)
             self._dossiers_crees.add(niveau)
 
     def invalider_cache(self, rel_dossier: str = "") -> None:
@@ -282,9 +329,7 @@ class ClientFtps:
                 raise ErreurFragmentBloquant(str(exc), fragment) from exc
             raise ErreurFtp(str(exc)) from exc
         except ftplib.all_errors as exc:  # type: ignore[misc]
-            if _est_panne_de_lien(exc):
-                raise ErreurLiaison(str(exc)) from exc
-            raise ErreurFtp(str(exc)) from exc
+            self._echec(exc)
 
     # ------------------------------------------- fragments d'envois interrompus
 
@@ -337,4 +382,4 @@ class ClientFtps:
         try:
             self._ftp.delete(chemin)
         except ftplib.all_errors as exc:  # type: ignore[misc]
-            raise ErreurFtp(str(exc)) from exc
+            self._echec(exc)

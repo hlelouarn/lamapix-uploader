@@ -45,6 +45,9 @@ class FauxLamapix:
         self.supprimes: list[str] = []
         # Coupures de lien (Starlink, 4G faible) : rel -> pannes restantes.
         self.pannes_de_lien: dict[str, int] = {}
+        # Panne du LIEN tout entier : les N prochains envois échouent, quelle
+        # que soit la photo — c'est le vrai visage d'une coupure Starlink.
+        self.panne_globale = 0
         self.fermetures_polies = 0
         self.fermetures_brutales = 0
 
@@ -139,6 +142,14 @@ class ClientFauxLamapix:
                     f"550 {absolu} : un fichier caché temporaire "
                     f"« {fragment} » existe déjà",
                     fragment,
+                )
+
+            if self.serveur.panne_globale > 0:
+                self.serveur.panne_globale -= 1
+                self._connecte = False
+                raise ErreurLiaison(
+                    "[WinError 10054] Une connexion existante a dû être fermée "
+                    "par l'hôte distant"
                 )
 
             pannes = self.serveur.pannes_de_lien.get(absolu, 0)

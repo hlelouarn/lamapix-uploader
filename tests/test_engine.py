@@ -26,6 +26,7 @@ def _pas_dattente_entre_essais(monkeypatch):
     subir en test. Les DÉLAIS DE REPRISE, eux, restent réels : plusieurs tests
     vérifient qu'une photo écartée n'est pas réessayée tout de suite."""
     monkeypatch.setattr(module_moteur, "DELAIS_ENTRE_ESSAIS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(module_moteur, "DELAIS_SONDE", (0.0,))
 
 
 @pytest.fixture
@@ -617,24 +618,26 @@ class TestLiaisonInstable:
 
 
 class TestCoupureNeGelePasLaFile:
-    """Le défaut vu en production sur Starlink : une photo touchée par une
-    coupure monopolisait un ouvrier pendant tout le délai de transfert. Avec
-    deux ouvriers, chaque coupure supprimait la moitié du débit ; le journal
-    montrait 2 min 36 sans le moindre envoi, alors que le lien tenait 85
-    photos/min entre deux coupures."""
+    """Le scénario Starlink : le LIEN tombe, pas les photos. Trois exigences —
+    une coupure brève ne coûte presque rien, une coupure longue est sondée par
+    un seul ouvrier, et au retour du lien tout repart à pleine vitesse parce
+    qu'aucun compteur d'échec n'a été empoisonné entre-temps."""
 
-    def test_une_coupure_ne_consomme_quun_seul_essai(
+    def test_une_coupure_breve_est_rattrapee_dans_la_foulee(
         self, source, serveur, fabrique_moteur
     ):
         distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
-        serveur.pannes_de_lien[distant] = 99
+        serveur.pannes_de_lien[distant] = 1
         poser_photo(source, PHOTO_A)
 
-        moteur = fabrique_moteur(source, essais_max=3)
+        moteur = fabrique_moteur(source)
         moteur._un_tour()
 
-        # Sans ça : 3 essais, donc trois fois le délai de transfert à attendre.
-        assert serveur.stors.count(distant) == 1
+        # Requeuée en tête et repartie dans le même tour, sans pénalité.
+        assert distant in serveur.fichiers
+        assert moteur._echecs_fichier == {}
+        assert moteur._pause_dossier == {}
+        assert moteur.etat().erreurs == 0
 
     def test_un_refus_du_serveur_reste_reessaye(self, source, serveur, fabrique_moteur):
         """La distinction doit rester fine : un 550 mérite toujours ses reprises."""
@@ -647,9 +650,42 @@ class TestCoupureNeGelePasLaFile:
 
         assert serveur.stors.count(distant) == 3
 
-    def test_la_file_continue_pendant_la_coupure(self, source, serveur, fabrique_moteur):
-        coupee = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
-        serveur.pannes_de_lien[coupee] = 99
+    def test_une_panne_globale_est_sondee_puis_tout_repart(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Le cœur du correctif : 6 photos, le lien tombe pour 4 tentatives.
+        Tout doit finir en ligne DANS LE MÊME TOUR, sans aucune pénalité."""
+        for index in range(6):
+            poser_photo(source, f"CSO_01_Amateur/1001_DUPONT MARIE_ECLAIR/p{index}.jpg")
+        serveur.panne_globale = 4
+
+        moteur = fabrique_moteur(source, connexions_paralleles=2)
+        moteur._un_tour()
+
+        assert len(deposes(serveur)) == 6
+        assert moteur.etat().erreurs == 0
+        assert moteur._pause_fichier == {}
+        assert moteur._pause_dossier == {}
+
+    def test_le_succes_referme_le_disjoncteur(self, source, serveur, fabrique_moteur):
+        poser_photo(source, PHOTO_A)
+        poser_photo(source, PHOTO_B)
+        serveur.panne_globale = 3
+
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+
+        assert moteur._pannes_liaison == 0
+        assert len(deposes(serveur)) == 2
+
+    def test_une_photo_pathologique_ne_monopolise_pas_la_sonde(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Une seule photo fait tomber le lien à chaque fois (routeur qui tue
+        les gros transferts, fichier maudit…) : après MAX essais, elle passe en
+        échec normal et les autres reprennent."""
+        maudite = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.pannes_de_lien[maudite] = 99
         poser_photo(source, PHOTO_A)
         poser_photo(source, PHOTO_B)
         poser_photo(source, PHOTO_C)
@@ -657,25 +693,10 @@ class TestCoupureNeGelePasLaFile:
         moteur = fabrique_moteur(source)
         moteur._un_tour()
 
-        assert len(deposes(serveur)) == 2
-        assert coupee not in serveur.fichiers
-
-    def test_la_photo_repart_des_que_le_lien_revient(
-        self, source, serveur, fabrique_moteur
-    ):
-        """Écartée, jamais abandonnée."""
-        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
-        interne = "DUPONT MARIE_ECLAIR/a.jpg"
-        serveur.pannes_de_lien[distant] = 1
-        poser_photo(source, PHOTO_A)
-
-        moteur = fabrique_moteur(source, essais_max=1)
-        moteur._un_tour()
-        assert moteur.etat().en_attente == 1
-
-        moteur._pause_fichier.clear()   # les 15 s se sont écoulées
-        moteur._un_tour()
-        assert distant in serveur.fichiers
+        assert serveur.stors.count(maudite) == module_moteur.MAX_LIAISONS_PAR_PHOTO
+        assert "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/b.jpg" in serveur.fichiers
+        assert "2026-08-02GRANDPRIX/MARTIN PAUL_ORAGE/c.jpg" in serveur.fichiers
+        assert moteur.etat().erreurs == 1
 
     def test_on_ne_dialogue_pas_avec_un_serveur_mort(
         self, source, serveur, fabrique_moteur
