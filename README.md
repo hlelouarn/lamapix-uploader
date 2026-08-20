@@ -228,18 +228,27 @@ timed out`. Le piège est que **toutes** les photos échouent en même temps.
   1 min, puis 4 min (plafond réglable) — et non 4 minutes d'emblée. Une mise à
   l'écart forfaitaire vidait la file et figeait l'outil quatre minutes pour une
   coupure de trois secondes. Un envoi réussi efface l'ardoise.
-- **Deux délais distincts** : ouvrir une connexion doit rester rapide (30 s),
-  mais un transfert en cours doit survivre à une interruption brève (180 s par
-  défaut, à monter vers 300 s sur satellite).
+- **Une coupure n'est pas un refus.** Un délai dépassé ou un `10054` signalent
+  que le *lien* est tombé, pas que la photo pose problème. Insister aussitôt sur
+  la même photo regèlerait un ouvrier pour tout le délai de transfert : on
+  l'écarte 15 s et on passe à la suivante. Un vrai refus du serveur (550), lui,
+  garde ses trois tentatives.
+- **Deux délais distincts** : ouvrir une connexion doit rester rapide (30 s) ;
+  le délai de transfert (60 s) est un délai **sans aucun octet échangé** — un
+  transfert vivant, même lent, avance en permanence. Le monter très haut est
+  contre-productif : ça ne sauve pas les transferts morts, ça fait juste
+  attendre plus longtemps avant de les abandonner.
+- **Fermeture sans dialogue** après une panne : attendre la réponse d'un serveur
+  muet coûterait le délai complet, pour une politesse dont personne n'a besoin.
 - **Keepalive TCP** sur la connexion de commande : elle reste inactive pendant
   l'envoi d'une photo, et un NAT opérateur (le CGNAT de Starlink) peut oublier
   la correspondance — d'où un `10054` pile au moment de l'accusé de réception.
 - **Nettoyage des fragments** (voir plus haut) : c'est précisément une coupure
   en plein transfert qui les crée. Les deux mécanismes vont ensemble.
 
-Si les erreurs persistent, l'ordre à essayer dans les réglages : *délai pendant
-un transfert* à 300 s, puis *envois simultanés* à 1 — sur une liaison saturée,
-trois transferts parallèles se gênent plus qu'ils n'accélèrent.
+Si le débit reste faible malgré tout, passer *envois simultanés* à **3** dans les
+réglages : un ouvrier immobilisé par une coupure pèse alors un tiers du débit au
+lieu de la moitié.
 
 ---
 
@@ -258,7 +267,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-143 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+156 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

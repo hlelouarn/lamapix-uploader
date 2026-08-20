@@ -95,3 +95,37 @@ class TestGardeFouSuppression:
     def test_refus_de_tout_ce_qui_nest_pas_un_fragment(self, client, chemin):
         with pytest.raises(ErreurFtp, match="refus de supprimer"):
             client.supprimer_fragment(chemin)
+
+
+class TestClassementDesPannes:
+    """Une liaison morte et un refus du serveur n'appellent pas la même réponse :
+    sur la première, insister sur la même photo ne fait que geler un ouvrier
+    pendant tout le délai de transfert."""
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            TimeoutError("timed out"),
+            ConnectionResetError("[WinError 10054] connexion fermée par l'hôte"),
+            ConnectionAbortedError("[WinError 10053]"),
+            EOFError(),
+            OSError("The read operation timed out"),
+        ],
+    )
+    def test_pannes_de_lien_reconnues(self, exception):
+        from lamapix_uploader.ftp import _est_panne_de_lien
+
+        assert _est_panne_de_lien(exception) is True
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            Exception("550 Permission denied"),
+            Exception("553 Could not create file"),
+            Exception("530 Login incorrect"),
+        ],
+    )
+    def test_refus_du_serveur_non_confondus(self, exception):
+        from lamapix_uploader.ftp import _est_panne_de_lien
+
+        assert _est_panne_de_lien(exception) is False

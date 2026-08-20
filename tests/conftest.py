@@ -12,7 +12,12 @@ import pytest
 from lamapix_uploader import paths
 from lamapix_uploader.config import Config
 from lamapix_uploader.engine import Moteur
-from lamapix_uploader.ftp import ErreurFragmentBloquant, ErreurFtp, ErreurIdentifiants
+from lamapix_uploader.ftp import (
+    ErreurFragmentBloquant,
+    ErreurFtp,
+    ErreurIdentifiants,
+    ErreurLiaison,
+)
 from lamapix_uploader.journal import Journal
 
 
@@ -38,6 +43,10 @@ class FauxLamapix:
         self.hidden_stores = False
         self.fragments: set[str] = set()
         self.supprimes: list[str] = []
+        # Coupures de lien (Starlink, 4G faible) : rel -> pannes restantes.
+        self.pannes_de_lien: dict[str, int] = {}
+        self.fermetures_polies = 0
+        self.fermetures_brutales = 0
 
     @staticmethod
     def fragment_de(chemin_absolu: str) -> str:
@@ -71,7 +80,15 @@ class ClientFauxLamapix:
             self.serveur.connexions += 1
         self._connecte = True
 
-    def fermer(self) -> None:
+    def fermer(self, poli: bool = True) -> None:
+        # On compte tous les appels : le vrai client garde son objet FTP même
+        # après une panne, et c'est précisément là que le QUIT poli coûterait
+        # cher. Se caler sur `_connecte` masquerait le cas qu'on veut vérifier.
+        with self.serveur.verrou:
+            if poli:
+                self.serveur.fermetures_polies += 1
+            else:
+                self.serveur.fermetures_brutales += 1
         self._connecte = False
         self._dossiers_crees.clear()
 
@@ -122,6 +139,15 @@ class ClientFauxLamapix:
                     f"550 {absolu} : un fichier caché temporaire "
                     f"« {fragment} » existe déjà",
                     fragment,
+                )
+
+            pannes = self.serveur.pannes_de_lien.get(absolu, 0)
+            if pannes > 0:
+                self.serveur.pannes_de_lien[absolu] = pannes - 1
+                self._connecte = False
+                raise ErreurLiaison(
+                    "[WinError 10054] Une connexion existante a dû être fermée "
+                    "par l'hôte distant"
                 )
 
             restants = self.serveur.echecs_pour.get(absolu, 0)

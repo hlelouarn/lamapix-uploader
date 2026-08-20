@@ -42,7 +42,9 @@ class Config:
     # transfert en cours doit pouvoir survivre à une coupure brève (changement
     # de satellite en Starlink, passage sous un pont en 4G…).
     timeout_connexion: int = 30
-    timeout_donnees: int = 180
+    # Délai SANS AUCUN octet échangé : un transfert vivant, même lent, avance en
+    # permanence. Trop généreux, il fait perdre une minute par photo morte.
+    timeout_donnees: int = 60
     pause_apres_echec: int = 240          # PLAFOND de mise en attente (fichier/dossier)
     echecs_avant_pause_dossier: int = 3
     rescan_max: int = 300                 # on recoupe la file pour re-scanner

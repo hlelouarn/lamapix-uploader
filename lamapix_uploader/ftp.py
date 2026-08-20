@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 TAILLE_BLOC = 65536
 TIMEOUT_CONNEXION_PAR_DEFAUT = 30
-TIMEOUT_DONNEES_PAR_DEFAUT = 180
+TIMEOUT_DONNEES_PAR_DEFAUT = 60
 
 # Keepalive sur la connexion de commande : pendant l'envoi d'une photo, elle
 # reste inactive. Un NAT opérateur (le CGNAT de Starlink, par exemple) peut
@@ -39,6 +39,33 @@ class ErreurFtp(Exception):
 
 class ErreurIdentifiants(ErreurFtp):
     """Login refusé (530) — il faut redemander le mot de passe."""
+
+
+class ErreurLiaison(ErreurFtp):
+    """La liaison est tombée : délai dépassé, connexion réinitialisée (10054).
+
+    À distinguer d'un refus du serveur. Insister tout de suite sur la MÊME photo
+    ne sert à rien — le lien est coupé, pas la photo en cause — et chaque essai
+    coûte le délai de transfert complet pendant lequel l'ouvrier ne fait rien.
+    Mieux vaut l'écarter brièvement et passer à la suivante.
+    """
+
+
+# Exceptions Python qui traduisent une liaison morte, pas un refus applicatif.
+_PANNES_DE_LIEN = (
+    TimeoutError,          # socket.timeout en est un alias depuis 3.10
+    ConnectionResetError,  # WinError 10054
+    ConnectionAbortedError,
+    ConnectionRefusedError,
+    EOFError,
+)
+
+
+def _est_panne_de_lien(exc: BaseException) -> bool:
+    if isinstance(exc, _PANNES_DE_LIEN):
+        return True
+    texte = str(exc).lower()
+    return "timed out" in texte or "10054" in texte or "10053" in texte
 
 
 class ErreurFragmentBloquant(ErreurFtp):
@@ -123,13 +150,20 @@ class ClientFtps:
             raise ErreurFtp(str(exc)) from exc
         except ftplib.all_errors as exc:  # type: ignore[misc]
             # all_errors couvre déjà OSError (réseau, DNS, timeout) et EOFError.
-            self._fermer_silencieusement(ftp)
+            self._fermer_silencieusement(ftp, poli=False)
+            if _est_panne_de_lien(exc):
+                raise ErreurLiaison(str(exc)) from exc
             raise ErreurFtp(str(exc)) from exc
         self._ftp = ftp
 
-    def fermer(self) -> None:
+    def fermer(self, poli: bool = True) -> None:
+        """`poli=False` : on ferme sans envoyer QUIT.
+
+        Après une panne, attendre la réponse d'un serveur muet peut coûter le
+        délai de transfert complet — pour une politesse dont personne n'a besoin.
+        """
         if self._ftp is not None:
-            self._fermer_silencieusement(self._ftp)
+            self._fermer_silencieusement(self._ftp, poli=poli)
             self._ftp = None
         self._dossiers_crees.clear()
 
@@ -149,14 +183,21 @@ class ClientFtps:
             pass  # confort, pas une condition de fonctionnement
 
     @staticmethod
-    def _fermer_silencieusement(ftp: ftplib.FTP_TLS) -> None:
-        try:
-            ftp.quit()
-        except Exception:
+    def _fermer_silencieusement(ftp: ftplib.FTP_TLS, poli: bool = True) -> None:
+        if poli:
             try:
-                ftp.close()
+                # QUIT attend une réponse : on borne l'attente, un serveur muet
+                # ne doit pas nous retenir.
+                if ftp.sock is not None:
+                    ftp.sock.settimeout(5)
+                ftp.quit()
+                return
             except Exception:
                 pass
+        try:
+            ftp.close()   # purement local, jamais bloquant
+        except Exception:
+            pass
 
     def __enter__(self) -> "ClientFtps":
         self.connecter()
@@ -241,6 +282,8 @@ class ClientFtps:
                 raise ErreurFragmentBloquant(str(exc), fragment) from exc
             raise ErreurFtp(str(exc)) from exc
         except ftplib.all_errors as exc:  # type: ignore[misc]
+            if _est_panne_de_lien(exc):
+                raise ErreurLiaison(str(exc)) from exc
             raise ErreurFtp(str(exc)) from exc
 
     # ------------------------------------------- fragments d'envois interrompus

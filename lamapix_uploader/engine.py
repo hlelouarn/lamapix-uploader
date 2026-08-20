@@ -20,7 +20,13 @@ from typing import Callable
 
 from . import paths
 from .config import Config
-from .ftp import ClientFtps, ErreurFragmentBloquant, ErreurFtp, ErreurIdentifiants
+from .ftp import (
+    ClientFtps,
+    ErreurFragmentBloquant,
+    ErreurFtp,
+    ErreurIdentifiants,
+    ErreurLiaison,
+)
 from .journal import Journal
 from .mapping import chemin_distant, rendre_unique
 from .memory import MemoireEvenement
@@ -582,7 +588,7 @@ class Moteur:
                 if essai > 1:
                     # Connexion neuve : Lamapix a pu consommer les dossiers, et une
                     # session keep-alive peut être dans un état bancal.
-                    client.fermer()
+                    client.fermer(poli=False)
                     client.invalider_cache(parent)
                 client.envoyer(fichier, rel)
                 self._noter_succes(memoire, source, rel)
@@ -607,6 +613,14 @@ class Moteur:
                     self.journal.erreur(f"fragment non supprimable — {rel} : {echec}")
                 if essai < self.config.essais_max and not self._arret.is_set():
                     time.sleep(self._attente_entre_essais(essai))
+            except ErreurLiaison as exc:
+                # Ce n'est pas cette photo qui pose problème, c'est le lien. Une
+                # nouvelle tentative immédiate rebloquerait l'ouvrier pour tout
+                # le délai de transfert, pendant lequel la file n'avance plus.
+                # On l'écarte brièvement et on passe à la suivante.
+                derniere = str(exc)
+                self.journal.ecrire(f"Liaison interrompue — {rel} : {exc}")
+                break
             except ErreurFtp as exc:
                 derniere = str(exc)
                 self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")

@@ -614,3 +614,79 @@ class TestLiaisonInstable:
         moteur = fabrique_moteur(source, timeout_connexion=20, timeout_donnees=300)
         client = moteur._client_ftps("secret")
         assert (client.timeout, client.timeout_donnees) == (20, 300)
+
+
+class TestCoupureNeGelePasLaFile:
+    """Le défaut vu en production sur Starlink : une photo touchée par une
+    coupure monopolisait un ouvrier pendant tout le délai de transfert. Avec
+    deux ouvriers, chaque coupure supprimait la moitié du débit ; le journal
+    montrait 2 min 36 sans le moindre envoi, alors que le lien tenait 85
+    photos/min entre deux coupures."""
+
+    def test_une_coupure_ne_consomme_quun_seul_essai(
+        self, source, serveur, fabrique_moteur
+    ):
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.pannes_de_lien[distant] = 99
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source, essais_max=3)
+        moteur._un_tour()
+
+        # Sans ça : 3 essais, donc trois fois le délai de transfert à attendre.
+        assert serveur.stors.count(distant) == 1
+
+    def test_un_refus_du_serveur_reste_reessaye(self, source, serveur, fabrique_moteur):
+        """La distinction doit rester fine : un 550 mérite toujours ses reprises."""
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.echecs_pour[distant] = 99
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source, essais_max=3)
+        moteur._un_tour()
+
+        assert serveur.stors.count(distant) == 3
+
+    def test_la_file_continue_pendant_la_coupure(self, source, serveur, fabrique_moteur):
+        coupee = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.pannes_de_lien[coupee] = 99
+        poser_photo(source, PHOTO_A)
+        poser_photo(source, PHOTO_B)
+        poser_photo(source, PHOTO_C)
+
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+
+        assert len(deposes(serveur)) == 2
+        assert coupee not in serveur.fichiers
+
+    def test_la_photo_repart_des_que_le_lien_revient(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Écartée, jamais abandonnée."""
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        interne = "DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.pannes_de_lien[distant] = 1
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source, essais_max=1)
+        moteur._un_tour()
+        assert moteur.etat().en_attente == 1
+
+        moteur._pause_fichier.clear()   # les 15 s se sont écoulées
+        moteur._un_tour()
+        assert distant in serveur.fichiers
+
+    def test_on_ne_dialogue_pas_avec_un_serveur_mort(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Un QUIT poli sur un lien coupé attend une réponse qui ne viendra pas."""
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.echecs_pour[distant] = 99
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source, essais_max=3)
+        moteur._un_tour()
+
+        # Les reconnexions entre tentatives ferment sans attendre le serveur.
+        assert serveur.fermetures_brutales >= 2
