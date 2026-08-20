@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 TAILLE_BLOC = 65536
 TIMEOUT_CONNEXION_PAR_DEFAUT = 30
-TIMEOUT_DONNEES_PAR_DEFAUT = 60
+TIMEOUT_DONNEES_PAR_DEFAUT = 12
 
 # Keepalive sur la connexion de commande : pendant l'envoi d'une photo, elle
 # reste inactive. Un NAT opérateur (le CGNAT de Starlink, par exemple) peut

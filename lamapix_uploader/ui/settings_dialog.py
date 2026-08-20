@@ -159,15 +159,16 @@ class DialogueReglages(QDialog):
         formulaire.addRow("Délai pour ouvrir une connexion :", self.champ_timeout_connexion)
 
         self.champ_timeout_donnees = self._compteur(
-            30, 600, self.config.timeout_donnees, " s"
+            5, 600, self.config.timeout_donnees, " s"
         )
         formulaire.addRow("Délai pendant un transfert :", self.champ_timeout_donnees)
         formulaire.addRow(
             "",
             self._aide(
-                "Sur une liaison satellite ou une 4G en limite de couverture, "
-                "augmenter ce délai (300 s) évite d'abandonner des envois que de "
-                "brèves coupures auraient seulement ralentis."
+                "Délai sans AUCUN octet échangé. 12 s suffisent : une photo part "
+                "en moins d'une seconde, un transfert figé plus longtemps est "
+                "mort — l'abandonner tôt et le relancer va plus vite que "
+                "d'attendre. Ne pas augmenter sur liaison satellite."
             ),
         )
 

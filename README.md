@@ -245,10 +245,12 @@ timed out`. Le piège est que **toutes** les photos échouent en même temps.
   échec normal : elle ne monopolise pas la sonde pendant que les autres
   attendent.
 - **Deux délais distincts** : ouvrir une connexion doit rester rapide (30 s) ;
-  le délai de transfert (60 s) est un délai **sans aucun octet échangé** — un
-  transfert vivant, même lent, avance en permanence. Le monter très haut est
-  contre-productif : ça ne sauve pas les transferts morts, ça fait juste
-  attendre plus longtemps avant de les abandonner.
+  le délai de transfert (**12 s**) est un délai **sans aucun octet échangé** —
+  un transfert vivant, même lent, avance en permanence. Le diagnostic terrain
+  l'a chiffré : une photo part en 0,6 s, et chaque socket morte attendue 20 à
+  45 s gelait un ouvrier pour rien. Abandonner à 12 s et relancer (≈ 3 s) est
+  toujours gagnant ; les configs portant les anciens défauts (60/180/300 s)
+  sont migrées automatiquement.
 - **Fermeture sans dialogue** après une panne : attendre la réponse d'un serveur
   muet coûterait le délai complet, pour une politesse dont personne n'a besoin.
 - **Keepalive TCP** sur la connexion de commande : elle reste inactive pendant
@@ -289,7 +291,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-164 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+175 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
