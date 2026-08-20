@@ -113,6 +113,14 @@ panne qui n'existe pas :
 | GitHub répond, rien d'installable | « aucune version installable par cette version de l'outil » — typiquement un poste resté sur une version antérieure à la 1.3.0, qui ne sait lire que les assets `.exe` |
 | Déjà à jour | « Vous êtes à jour » |
 
+**Certificats.** L'outil essaie d'abord le magasin de Windows (qui connaît les
+racines installées par l'entreprise, donc les proxys filtrant le HTTPS), puis un
+jeu de racines **embarqué**. Windows ne livre qu'un petit socle et télécharge les
+autres à la demande : sur un réseau de concours filtré, la racine Sectigo
+d'`api.github.com` peut manquer alors que Lamapix (Let's Encrypt) passe très bien
+sur le même PC. La vérification n'est **jamais** désactivée — cette connexion sert
+à télécharger un exécutable qu'on va ensuite lancer.
+
 Un poste antérieur à la 1.3.0 doit être **mis à jour une fois à la main** :
 télécharger le ZIP et remplacer le dossier. Les suivantes passeront seules.
 
@@ -228,7 +236,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-131 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+136 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

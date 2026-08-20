@@ -24,7 +24,9 @@ a = Analysis(
     pathex=[str(RACINE)],
     binaries=[],
     datas=[(str(ICONE), "assets")],
-    hiddenimports=["PySide6.QtNetwork"],
+    # certifi est importé paresseusement (magasin de certificats de secours
+    # pour la mise à jour) : l'analyse statique ne le verrait pas.
+    hiddenimports=["PySide6.QtNetwork", "certifi"],
     hookspath=[],
     runtime_hooks=[],
     # Modules Qt lourds et inutiles ici : on garde l'exe raisonnable.

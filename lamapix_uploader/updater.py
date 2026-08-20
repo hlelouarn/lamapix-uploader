@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,57 @@ from . import VERSION, paths
 DELAI_RESEAU = 10
 NOM_EXE = "LamapixUploader.exe"
 ESSAIS_REMPLACEMENT = 30  # ~30 s d'attente que Windows relâche l'exe
+
+
+def _contextes_ssl() -> list[ssl.SSLContext]:
+    """Magasins de certificats à essayer, dans l'ordre.
+
+    1. Celui de Windows : il connaît les racines installées par l'entreprise,
+       donc les proxys qui déchiffrent le HTTPS.
+    2. Un jeu de racines embarqué. Windows ne livre qu'un petit socle et
+       télécharge les autres à la demande — ce qui échoue sur un réseau de
+       concours filtré ou sans accès à Windows Update. C'est exactement le cas
+       rencontré : la racine Sectigo d'api.github.com manquait, alors que
+       Lamapix (Let's Encrypt) passait sans problème sur le même PC.
+
+    On ne désactive JAMAIS la vérification : cette connexion sert à télécharger
+    un exécutable qu'on va ensuite lancer.
+    """
+    contextes = [ssl.create_default_context()]
+    try:
+        import certifi
+
+        contextes.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    return contextes
+
+
+def _ouvrir(requete: "urllib.request.Request", timeout: int):
+    """urlopen, en réessayant avec le magasin suivant sur erreur de certificat."""
+    derniere: Exception | None = None
+    for contexte in _contextes_ssl():
+        try:
+            return urllib.request.urlopen(requete, timeout=timeout, context=contexte)
+        except urllib.error.URLError as exc:
+            if not isinstance(getattr(exc, "reason", None), ssl.SSLError):
+                raise
+            derniere = exc
+    raise derniere  # type: ignore[misc]
+
+
+def _expliquer(exc: Exception) -> str:
+    """Message lisible : « certificate verify failed » ne dit rien à personne."""
+    texte = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in texte or "certificate verify failed" in texte:
+        return (
+            "le certificat de GitHub n'a pas pu être vérifié sur ce PC.\n"
+            "Windows n'a probablement pas la racine nécessaire et ne peut pas "
+            "aller la chercher depuis ce réseau ; un antivirus ou un proxy qui "
+            "filtre le HTTPS produit le même effet.\n\n"
+            f"Détail : {texte}"
+        )
+    return texte
 
 
 class ErreurReseau(Exception):
@@ -71,13 +123,13 @@ def chercher(depot: str) -> MiseAJour | None:
         url, headers={"Accept": "application/vnd.github+json", "User-Agent": "LamapixUploader"}
     )
     try:
-        with urllib.request.urlopen(requete, timeout=DELAI_RESEAU) as reponse:
+        with _ouvrir(requete, DELAI_RESEAU) as reponse:
             donnees = json.loads(reponse.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # 403 = quota d'appels anonymes dépassé ; 404 = dépôt privé ou renommé.
         raise ErreurReseau(f"GitHub a répondu {exc.code} ({exc.reason})") from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise ErreurReseau(str(exc)) from exc
+        raise ErreurReseau(_expliquer(exc)) from exc
     except ValueError as exc:
         raise ErreurReseau(f"réponse illisible : {exc}") from exc
 
@@ -123,7 +175,7 @@ def telecharger(mise_a_jour: MiseAJour) -> Path:
     requete = urllib.request.Request(
         mise_a_jour.url_paquet, headers={"User-Agent": "LamapixUploader"}
     )
-    with urllib.request.urlopen(requete, timeout=120) as reponse:
+    with _ouvrir(requete, 120) as reponse:
         archive.write_bytes(reponse.read())
 
     if not mise_a_jour.est_archive:

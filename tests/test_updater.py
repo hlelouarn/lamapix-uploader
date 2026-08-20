@@ -277,3 +277,63 @@ class TestGardeFous:
         assert "robocopy" in script
         assert "/MIR" not in script   # /MIR purgerait `donnees\`
         assert str(nouvelle) in script
+
+
+class TestMagasinsDeCertificats:
+    """Sur un PC de concours, Windows n'a pas toujours la racine du certificat de
+    GitHub et ne peut pas aller la chercher. On embarque donc un jeu de racines
+    en secours — sans jamais désactiver la vérification : cette connexion sert à
+    télécharger un exécutable qu'on va lancer."""
+
+    def test_deux_magasins_sont_proposes(self):
+        contextes = updater._contextes_ssl()
+        assert len(contextes) == 2
+
+    def test_aucun_magasin_ne_desactive_la_verification(self):
+        import ssl as module_ssl
+
+        for contexte in updater._contextes_ssl():
+            assert contexte.verify_mode == module_ssl.CERT_REQUIRED
+            assert contexte.check_hostname is True
+
+    def test_bascule_sur_le_second_magasin_apres_erreur_de_certificat(self, monkeypatch):
+        import ssl as module_ssl
+
+        appels = []
+
+        def urlopen(requete, timeout=None, context=None):
+            appels.append(context)
+            if len(appels) == 1:
+                raise updater.urllib.error.URLError(
+                    module_ssl.SSLError("CERTIFICATE_VERIFY_FAILED")
+                )
+            return io.BytesIO(b"ok")
+
+        monkeypatch.setattr(updater.urllib.request, "urlopen", urlopen)
+        assert updater._ouvrir(object(), 5).read() == b"ok"
+        assert len(appels) == 2 and appels[0] is not appels[1]
+
+    def test_une_erreur_qui_nest_pas_un_certificat_ne_reessaie_pas(self, monkeypatch):
+        appels = []
+
+        def urlopen(requete, timeout=None, context=None):
+            appels.append(context)
+            raise updater.urllib.error.URLError("getaddrinfo failed")
+
+        monkeypatch.setattr(updater.urllib.request, "urlopen", urlopen)
+        with pytest.raises(updater.urllib.error.URLError):
+            updater._ouvrir(object(), 5)
+        assert len(appels) == 1   # inutile d'attendre deux fois le même timeout
+
+    def test_le_message_explique_le_probleme_de_certificat(self, monkeypatch):
+        import ssl as module_ssl
+
+        def urlopen(*_a, **_k):
+            raise updater.urllib.error.URLError(
+                module_ssl.SSLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+            )
+
+        monkeypatch.setattr(updater.urllib.request, "urlopen", urlopen)
+        with pytest.raises(updater.ErreurReseau) as capture:
+            updater.chercher("compte/depot")
+        assert "racine" in str(capture.value) or "certificat" in str(capture.value)
