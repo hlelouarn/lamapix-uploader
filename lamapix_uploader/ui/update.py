@@ -17,9 +17,16 @@ from .. import updater
 
 
 class ChercheurMiseAJour(QObject):
-    """Interroge les releases GitHub. Ne lève jamais : émet None en cas d'échec."""
+    """Interroge les releases GitHub.
+
+    Deux issues bien distinctes : `fini` porte la release trouvée (ou None si
+    GitHub répond sans rien proposer d'installable), `echec` signale qu'on n'a
+    pas pu lui parler. Les confondre, c'est annoncer une panne de réseau qui
+    n'existe pas.
+    """
 
     fini = Signal(object)  # updater.MiseAJour | None
+    echec = Signal(str)
 
     def __init__(self, depot: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -31,8 +38,12 @@ class ChercheurMiseAJour(QObject):
     def _travail(self) -> None:
         try:
             resultat = updater.chercher(self._depot)
-        except Exception:
-            resultat = None
+        except updater.ErreurReseau as exc:
+            self.echec.emit(str(exc))
+            return
+        except Exception as exc:
+            self.echec.emit(f"erreur inattendue : {exc}")
+            return
         self.fini.emit(resultat)
 
 

@@ -25,6 +25,15 @@ NOM_EXE = "LamapixUploader.exe"
 ESSAIS_REMPLACEMENT = 30  # ~30 s d'attente que Windows relâche l'exe
 
 
+class ErreurReseau(Exception):
+    """GitHub injoignable ou illisible.
+
+    À NE PAS confondre avec « GitHub a répondu, mais ne propose rien
+    d'installable » : les deux appellent des messages opposés, et les mélanger
+    envoie l'utilisateur chercher une panne de réseau qui n'existe pas.
+    """
+
+
 @dataclass
 class MiseAJour:
     version: str
@@ -51,9 +60,11 @@ def _numeros(version: str) -> tuple[int, ...]:
 
 
 def chercher(depot: str) -> MiseAJour | None:
-    """Dernière release publiée, ou None (hors ligne, pas de release, dépôt privé…).
+    """Dernière release installable.
 
-    Ne lève jamais : une mise à jour indisponible ne doit pas empêcher de bosser.
+    Retourne None quand GitHub répond mais n'offre rien d'installable (pas de
+    release, ou aucune archive utilisable par CETTE version de l'outil).
+    Lève `ErreurReseau` quand on n'a pas pu lui parler du tout.
     """
     url = f"https://api.github.com/repos/{depot}/releases/latest"
     requete = urllib.request.Request(
@@ -62,8 +73,13 @@ def chercher(depot: str) -> MiseAJour | None:
     try:
         with urllib.request.urlopen(requete, timeout=DELAI_RESEAU) as reponse:
             donnees = json.loads(reponse.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        return None
+    except urllib.error.HTTPError as exc:
+        # 403 = quota d'appels anonymes dépassé ; 404 = dépôt privé ou renommé.
+        raise ErreurReseau(f"GitHub a répondu {exc.code} ({exc.reason})") from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise ErreurReseau(str(exc)) from exc
+    except ValueError as exc:
+        raise ErreurReseau(f"réponse illisible : {exc}") from exc
 
     version = str(donnees.get("tag_name") or "").lstrip("vV")
     if not version:

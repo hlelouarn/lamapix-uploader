@@ -372,21 +372,47 @@ class FenetrePrincipale(QMainWindow):
         self._chercheur.fini.connect(
             lambda trouvee: self._reponse_maj(trouvee, silencieux)
         )
+        self._chercheur.echec.connect(
+            lambda message: self._echec_recherche_maj(message, silencieux)
+        )
         self._chercheur.demarrer()
 
-    def _reponse_maj(self, trouvee, silencieux: bool) -> None:
+    def _echec_recherche_maj(self, message: str, silencieux: bool) -> None:
+        """GitHub injoignable — la seule situation où parler de réseau est juste."""
         self._chercheur = None
+        self._rendre_bouton_maj()
+        self.moteur.journal.ecrire(f"Vérification des mises à jour impossible : {message}")
+        if silencieux:
+            return
+        QMessageBox.warning(
+            self,
+            "Mise à jour",
+            f"Impossible de joindre GitHub.\n\n{message}\n\n"
+            "Sans importance : l'outil continue d'envoyer normalement.",
+        )
+
+    def _rendre_bouton_maj(self) -> None:
         self.bouton_maj.setEnabled(True)
         self.bouton_maj.setText("Mise à jour")
 
+    def _reponse_maj(self, trouvee, silencieux: bool) -> None:
+        self._chercheur = None
+        self._rendre_bouton_maj()
+
         if trouvee is None:
-            self.moteur.journal.ecrire("Vérification des mises à jour : sans réponse")
+            # GitHub a bien répondu : ne surtout pas parler de réseau ici.
+            self.moteur.journal.ecrire(
+                "Vérification des mises à jour : aucune version installable publiée"
+            )
             if not silencieux:
-                QMessageBox.warning(
+                QMessageBox.information(
                     self,
                     "Mise à jour",
-                    "Impossible de joindre GitHub.\n\n"
-                    "Sans importance : l'outil continue d'envoyer normalement.",
+                    "GitHub répond, mais ne propose aucune version installable "
+                    "par cette version de l'outil.\n\n"
+                    "Si ce PC est resté sur une version ancienne, il doit être mis "
+                    "à jour une fois à la main : télécharger le ZIP de la dernière "
+                    "release et remplacer le dossier.",
                 )
             return
 

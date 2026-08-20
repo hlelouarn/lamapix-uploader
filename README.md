@@ -104,6 +104,18 @@ répond toujours quelque chose, y compris « vous êtes à jour ».
 
 Hors ligne, la vérification échoue en silence et n'empêche rien.
 
+Les trois issues sont distinguées, parce que les confondre fait chercher une
+panne qui n'existe pas :
+
+| Situation | Message |
+|---|---|
+| GitHub injoignable | « Impossible de joindre GitHub », avec le détail (DNS, quota 403…) |
+| GitHub répond, rien d'installable | « aucune version installable par cette version de l'outil » — typiquement un poste resté sur une version antérieure à la 1.3.0, qui ne sait lire que les assets `.exe` |
+| Déjà à jour | « Vous êtes à jour » |
+
+Un poste antérieur à la 1.3.0 doit être **mis à jour une fois à la main** :
+télécharger le ZIP et remplacer le dossier. Les suivantes passeront seules.
+
 ## Si un antivirus supprime l'outil
 
 Ça arrive avec tout exécutable Python non signé. Deux précautions sont déjà
@@ -216,7 +228,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-129 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+131 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

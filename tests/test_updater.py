@@ -126,16 +126,29 @@ class TestLectureRelease:
         monkeypatch.setattr(updater.urllib.request, "urlopen", _reponse({"assets": []}))
         assert updater.chercher("compte/depot") is None
 
-    def test_reseau_coupe_ne_leve_pas(self, monkeypatch):
-        """Hors ligne sur un site de concours : ça ne doit surtout rien casser."""
+    def test_reseau_coupe_est_signale_comme_tel(self, monkeypatch):
+        """Distinguer « injoignable » de « rien à installer » : sans ça, un poste
+        en retard d'une version se voit annoncer une panne de réseau inexistante,
+        et on part chercher un problème qui n'existe pas."""
 
         def tombe(*_a, **_k):
             raise OSError("getaddrinfo failed")
 
         monkeypatch.setattr(updater.urllib.request, "urlopen", tombe)
-        assert updater.chercher("compte/depot") is None
+        with pytest.raises(updater.ErreurReseau, match="getaddrinfo"):
+            updater.chercher("compte/depot")
 
-    def test_json_invalide_ne_leve_pas(self, monkeypatch):
+    def test_quota_github_est_signale_avec_son_code(self, monkeypatch):
+        def refuse(*_a, **_k):
+            raise updater.urllib.error.HTTPError(
+                "http://x", 403, "rate limit exceeded", {}, None
+            )
+
+        monkeypatch.setattr(updater.urllib.request, "urlopen", refuse)
+        with pytest.raises(updater.ErreurReseau, match="403"):
+            updater.chercher("compte/depot")
+
+    def test_json_invalide_est_une_erreur_reseau(self, monkeypatch):
         class Fausse(io.BytesIO):
             def __enter__(self):
                 return self
@@ -146,7 +159,28 @@ class TestLectureRelease:
         monkeypatch.setattr(
             updater.urllib.request, "urlopen", lambda *_a, **_k: Fausse(b"pas du json")
         )
-        assert updater.chercher("compte/depot") is None
+        with pytest.raises(updater.ErreurReseau):
+            updater.chercher("compte/depot")
+
+    def test_pas_de_paquet_utilisable_nest_pas_une_panne_reseau(self, monkeypatch):
+        """Le cas réellement rencontré : un poste ancien ne sait lire que les
+        assets .exe, la release n'en publie plus. GitHub répond très bien."""
+        monkeypatch.setattr(
+            updater.urllib.request,
+            "urlopen",
+            _reponse(
+                {
+                    "tag_name": "v9.9.9",
+                    "assets": [
+                        {
+                            "name": "LamapixUploader-v9.9.9.tar.gz",
+                            "browser_download_url": "http://x/a.tar.gz",
+                        }
+                    ],
+                }
+            ),
+        )
+        assert updater.chercher("compte/depot") is None   # et surtout : pas d'exception
 
 
 class TestArchive:
