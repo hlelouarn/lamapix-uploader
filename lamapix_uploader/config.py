@@ -38,7 +38,12 @@ class Config:
     intervalle_scan: int = 30             # secondes entre deux scans
     delai_stabilite: int = 15             # un fichier plus récent est ignoré
     essais_max: int = 3                   # tentatives par photo
-    pause_apres_echec: int = 240          # secondes de mise en attente (fichier/dossier)
+    # Deux timeouts distincts : ouvrir une connexion doit être rapide, mais un
+    # transfert en cours doit pouvoir survivre à une coupure brève (changement
+    # de satellite en Starlink, passage sous un pont en 4G…).
+    timeout_connexion: int = 30
+    timeout_donnees: int = 180
+    pause_apres_echec: int = 240          # PLAFOND de mise en attente (fichier/dossier)
     echecs_avant_pause_dossier: int = 3
     rescan_max: int = 300                 # on recoupe la file pour re-scanner
     connexions_paralleles: int = 2        # 1 = séquentiel ; 3 max raisonnable

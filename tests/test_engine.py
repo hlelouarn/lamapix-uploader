@@ -22,8 +22,10 @@ AMBIANCE = "0_AMBIANCE/0001_AMBIANCE_AMBIANCE/z.jpg"
 
 @pytest.fixture(autouse=True)
 def _pas_dattente_entre_essais(monkeypatch):
-    """Les reprises attendent 3 s en production ; inutile de le subir en test."""
-    monkeypatch.setattr(module_moteur, "PAUSE_ENTRE_ESSAIS", 0)
+    """Les reprises attendent quelques secondes en production ; inutile de le
+    subir en test. Les DÉLAIS DE REPRISE, eux, restent réels : plusieurs tests
+    vérifient qu'une photo écartée n'est pas réessayée tout de suite."""
+    monkeypatch.setattr(module_moteur, "DELAIS_ENTRE_ESSAIS", (0.0, 0.0, 0.0))
 
 
 @pytest.fixture
@@ -534,3 +536,81 @@ class TestFragmentsInterrompus:
             PurePosixPath(chemin).name.startswith(".in.")
             for chemin in serveur.supprimes
         )
+
+
+class TestLiaisonInstable:
+    """Starlink, 4G en limite de couverture : coupures brèves et répétées.
+
+    Le piège est que TOUTES les photos échouent en même temps. Une mise à
+    l'écart forfaitaire de 4 minutes viderait la file et figerait l'outil,
+    alors que la coupure n'a duré que quelques secondes.
+    """
+
+    def test_la_premiere_reprise_est_rapide(self, source, fabrique_moteur):
+        moteur = fabrique_moteur(source)
+        assert moteur._mise_en_attente(1) == 15
+
+    def test_linsistance_espace_les_reprises(self, source, fabrique_moteur):
+        moteur = fabrique_moteur(source)
+        attentes = [moteur._mise_en_attente(n) for n in (1, 2, 3, 4, 10)]
+        assert attentes == [15, 60, 240, 240, 240]
+        assert attentes == sorted(attentes)   # jamais décroissant
+
+    def test_le_plafond_reglable_est_respecte(self, source, fabrique_moteur):
+        moteur = fabrique_moteur(source, pause_apres_echec=30)
+        assert moteur._mise_en_attente(3) == 30
+
+    def test_une_coupure_breve_ne_coute_que_quinze_secondes(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Avant : 4 minutes d'arrêt complet pour une microcoupure."""
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        interne = "DUPONT MARIE_ECLAIR/a.jpg"   # le moteur indexe sans l'événement
+        serveur.echecs_pour[distant] = 99
+        poser_photo(source, PHOTO_A)
+
+        moteur = fabrique_moteur(source, essais_max=1)
+        moteur._un_tour()
+
+        restant = moteur._pause_fichier[interne] - time.monotonic()
+        assert 10 < restant <= 15
+
+    def test_un_succes_efface_lhistorique_des_echecs(
+        self, source, serveur, fabrique_moteur
+    ):
+        """La liaison est revenue : la photo suivante ne doit pas hériter des
+        pénalités accumulées pendant la coupure."""
+        distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
+        interne = "DUPONT MARIE_ECLAIR/a.jpg"
+        serveur.echecs_pour[distant] = 99
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, essais_max=1)
+
+        moteur._un_tour()
+        moteur._pause_fichier.clear()
+        moteur._un_tour()
+        assert moteur._echecs_fichier[interne] == 2   # ça s'aggrave tant que ça rate
+
+        serveur.echecs_pour[distant] = 0
+        moteur._pause_fichier.clear()
+        moteur._un_tour()
+
+        assert distant in serveur.fichiers
+        assert interne not in moteur._echecs_fichier
+        assert moteur.etat().erreurs == 0
+
+    def test_les_tentatives_immediates_sont_espacees_progressivement(
+        self, source, fabrique_moteur, monkeypatch
+    ):
+        # On lève la neutralisation posée par la fixture pour lire les vrais délais.
+        monkeypatch.setattr(module_moteur, "DELAIS_ENTRE_ESSAIS", (3.0, 10.0, 20.0))
+        moteur = fabrique_moteur(source)
+        attentes = [moteur._attente_entre_essais(n) for n in (1, 2, 3, 9)]
+        assert attentes == [3.0, 10.0, 20.0, 20.0]
+
+    def test_les_timeouts_sont_transmis_au_client(self, source, fabrique_moteur):
+        """Ouvrir doit rester rapide ; un transfert doit pouvoir survivre à une
+        coupure de plusieurs dizaines de secondes."""
+        moteur = fabrique_moteur(source, timeout_connexion=20, timeout_donnees=300)
+        client = moteur._client_ftps("secret")
+        assert (client.timeout, client.timeout_donnees) == (20, 300)

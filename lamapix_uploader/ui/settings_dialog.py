@@ -127,11 +127,39 @@ class DialogueReglages(QDialog):
         self.champ_essais = self._compteur(1, 10, self.config.essais_max, "")
         formulaire.addRow("Tentatives par photo :", self.champ_essais)
 
+        self.champ_timeout_connexion = self._compteur(
+            5, 120, self.config.timeout_connexion, " s"
+        )
+        formulaire.addRow("Délai pour ouvrir une connexion :", self.champ_timeout_connexion)
+
+        self.champ_timeout_donnees = self._compteur(
+            30, 600, self.config.timeout_donnees, " s"
+        )
+        formulaire.addRow("Délai pendant un transfert :", self.champ_timeout_donnees)
+        formulaire.addRow(
+            "",
+            self._aide(
+                "Sur une liaison satellite ou une 4G en limite de couverture, "
+                "augmenter ce délai (300 s) évite d'abandonner des envois que de "
+                "brèves coupures auraient seulement ralentis."
+            ),
+        )
+
         self.champ_paralleles = self._compteur(1, 3, self.config.connexions_paralleles, "")
         formulaire.addRow("Envois simultanés :", self.champ_paralleles)
         formulaire.addRow(
             "",
             self._aide("2 ou 3 accélèrent les gros rattrapages ; 1 = envoi séquentiel."),
+        )
+
+        self.champ_pause = self._compteur(15, 900, self.config.pause_apres_echec, " s")
+        formulaire.addRow("Mise à l'écart maximale après échec :", self.champ_pause)
+        formulaire.addRow(
+            "",
+            self._aide(
+                "Une photo en échec est écartée 15 s, puis 1 min, puis ce plafond "
+                "— la file continue pendant ce temps."
+            ),
         )
 
         self.champ_purge = self._compteur(0, 720, self.config.purge_apres_heures, " h")
@@ -206,6 +234,9 @@ class DialogueReglages(QDialog):
         self.config.delai_stabilite = self.champ_stabilite.value()
         self.config.essais_max = self.champ_essais.value()
         self.config.connexions_paralleles = self.champ_paralleles.value()
+        self.config.timeout_connexion = self.champ_timeout_connexion.value()
+        self.config.timeout_donnees = self.champ_timeout_donnees.value()
+        self.config.pause_apres_echec = self.champ_pause.value()
         self.config.purge_apres_heures = self.champ_purge.value()
         self.config.reduire_dans_zone_notification = self.case_zone.isChecked()
         self.config.verifier_mises_a_jour = self.case_maj.isChecked()

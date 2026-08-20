@@ -26,7 +26,11 @@ from .mapping import chemin_distant, rendre_unique
 from .memory import MemoireEvenement
 from .scanner import PhotoTrouvee, lister_evenements, scanner
 
-PAUSE_ENTRE_ESSAIS = 3.0
+# Reprises progressives. Un lien instable (satellite, 4G en limite de couverture)
+# produit des coupures brèves : réessayer plus tard, mais pas toutes les 3 s, et
+# surtout pas en mettant d'emblée la photo de côté pour 4 minutes.
+DELAIS_ENTRE_ESSAIS = (3.0, 10.0, 20.0)
+DELAIS_REPRISE = (15, 60, 240)
 INTERVALLE_PURGE_MINUTES = 10
 
 
@@ -96,6 +100,8 @@ class Moteur:
         self._pause_fichier: dict[str, float] = {}
         self._pause_dossier: dict[str, float] = {}
         self._echecs_dossier: dict[str, int] = {}
+        self._echecs_fichier: dict[str, int] = {}
+        self._echecs_dossier_suite: dict[str, int] = {}
         self._envois_recents: deque[float] = deque()
         self._dernier_envoi: datetime | None = None
         self._prochaine_purge = 0.0
@@ -543,6 +549,8 @@ class Moteur:
             mot_de_passe=mot_de_passe,
             racine=self.config.evenement or "",
             ignorer_certificat=self.config.ignorer_certificat,
+            timeout=self.config.timeout_connexion,
+            timeout_donnees=self.config.timeout_donnees,
         )
 
     def _envoyer_une(
@@ -598,12 +606,12 @@ class Moteur:
                 except ErreurFtp as echec:
                     self.journal.erreur(f"fragment non supprimable — {rel} : {echec}")
                 if essai < self.config.essais_max and not self._arret.is_set():
-                    time.sleep(PAUSE_ENTRE_ESSAIS)
+                    time.sleep(self._attente_entre_essais(essai))
             except ErreurFtp as exc:
                 derniere = str(exc)
                 self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")
                 if essai < self.config.essais_max and not self._arret.is_set():
-                    time.sleep(PAUSE_ENTRE_ESSAIS)
+                    time.sleep(self._attente_entre_essais(essai))
 
         self._noter_echec(rel, parent, derniere)
         return False
@@ -627,31 +635,59 @@ class Moteur:
             memoire.sauver_si_necessaire()
             self._erreurs.pop(rel, None)
             self._pause_fichier.pop(rel, None)
+            # Un succès efface l'historique : la liaison est revenue.
+            self._echecs_fichier.pop(rel, None)
             self._echecs_dossier[parent] = 0
+            self._echecs_dossier_suite.pop(parent, None)
             self._dernier_envoi = maintenant
             self._envois_recents.append(time.monotonic())
             self._elaguer_debit()
             self._note = f"Envoi en cours — {memoire.nombre_en_attente} photo(s) en attente…"
         self.journal.succes(rel)
 
+    def _attente_entre_essais(self, essai: int) -> float:
+        """Délai avant la tentative suivante, croissant."""
+        return DELAIS_ENTRE_ESSAIS[min(essai, len(DELAIS_ENTRE_ESSAIS)) - 1]
+
+    def _mise_en_attente(self, echecs: int) -> float:
+        """Secondes de mise à l'écart, selon le nombre d'échecs consécutifs.
+
+        Progressif et non forfaitaire : sur une liaison instable, TOUTES les
+        photos échouent en même temps. Les écarter d'emblée pour 4 minutes vide
+        la file et fige l'outil pendant ce temps, alors que la coupure n'a duré
+        que quelques secondes. On réessaie vite d'abord, on n'insiste que si ça
+        dure.
+        """
+        base = DELAIS_REPRISE[min(echecs, len(DELAIS_REPRISE)) - 1]
+        return float(min(base, self.config.pause_apres_echec))
+
     def _noter_echec(self, rel: str, parent: str, message: str) -> None:
-        """Un fichier en erreur ne doit JAMAIS bloquer les autres : on le met de
-        côté quelques minutes et la file continue."""
-        attente = self.config.pause_apres_echec
+        """Un fichier en erreur ne doit JAMAIS bloquer les autres : on l'écarte
+        un moment et la file continue."""
         with self._verrou:
             self._erreurs[rel] = message
             self._derniere_erreur = f"{rel} : {message}"
+            self._echecs_fichier[rel] = self._echecs_fichier.get(rel, 0) + 1
+            attente = self._mise_en_attente(self._echecs_fichier[rel])
             self._pause_fichier[rel] = time.monotonic() + attente
+
             self._echecs_dossier[parent] = self._echecs_dossier.get(parent, 0) + 1
             trop = self._echecs_dossier[parent] >= self.config.echecs_avant_pause_dossier
+            attente_dossier = 0.0
             if trop:
-                self._pause_dossier[parent] = time.monotonic() + attente
+                self._echecs_dossier_suite[parent] = (
+                    self._echecs_dossier_suite.get(parent, 0) + 1
+                )
+                attente_dossier = self._mise_en_attente(
+                    self._echecs_dossier_suite[parent]
+                )
+                self._pause_dossier[parent] = time.monotonic() + attente_dossier
                 self._echecs_dossier[parent] = 0
-        self.journal.erreur(f"{rel} : {message}")
+        self.journal.erreur(f"{rel} : {message} (nouvel essai dans {int(attente)} s)")
         if trop:
             self.journal.ecrire(
                 f"Dossier « {parent or '(racine)'} » mis en attente "
-                f"{attente // 60} min après échecs répétés"
+                f"{int(attente_dossier)} s après échecs répétés"
             )
 
     def _elaguer_debit(self) -> None:
@@ -688,6 +724,8 @@ class Moteur:
             self._pause_fichier.clear()
             self._pause_dossier.clear()
             self._echecs_dossier.clear()
+            self._echecs_fichier.clear()
+            self._echecs_dossier_suite.clear()
             self._epreuves_signalees.clear()
             self._dernier_scan = []
             self._detectees = 0

@@ -184,9 +184,8 @@ ingestion. Un FTP vide ne prouve donc rien. Conséquences, toutes implémentées
   (typiquement **550**), on invalide, on recrée l'arborescence, et on réessaie
   sur une **connexion neuve** ;
 - la racine de l'événement est **créée par l'outil** — Kadra ne le fait plus ;
-- 3 tentatives par photo, puis mise en attente 4 min et **la file continue** :
-  un fichier en erreur ne bloque jamais les autres. 3 échecs d'affilée dans un
-  dossier → tout le dossier attend 4 min ;
+- 3 tentatives par photo (espacées de 3 s, 10 s, 20 s), puis mise à l'écart et
+  **la file continue** : un fichier en erreur ne bloque jamais les autres ;
 - **aucune photo, aucun dossier n'est jamais supprimé côté FTP.** Une seule
   exception, détaillée ci-dessous : les fragments d'envois interrompus.
 
@@ -219,6 +218,29 @@ Trois garde-fous, parce qu'une réponse serveur est une donnée et pas un ordre 
 
 Chaque suppression est écrite au journal.
 
+## Liaisons instables (satellite, 4G en limite de couverture)
+
+Un lien Starlink ou une 4G faible produisent des coupures brèves mais répétées :
+`WinError 10054` (connexion réinitialisée par le serveur), `read/write operation
+timed out`. Le piège est que **toutes** les photos échouent en même temps.
+
+- **Mise à l'écart progressive** : une photo en échec est écartée 15 s, puis
+  1 min, puis 4 min (plafond réglable) — et non 4 minutes d'emblée. Une mise à
+  l'écart forfaitaire vidait la file et figeait l'outil quatre minutes pour une
+  coupure de trois secondes. Un envoi réussi efface l'ardoise.
+- **Deux délais distincts** : ouvrir une connexion doit rester rapide (30 s),
+  mais un transfert en cours doit survivre à une interruption brève (180 s par
+  défaut, à monter vers 300 s sur satellite).
+- **Keepalive TCP** sur la connexion de commande : elle reste inactive pendant
+  l'envoi d'une photo, et un NAT opérateur (le CGNAT de Starlink) peut oublier
+  la correspondance — d'où un `10054` pile au moment de l'accusé de réception.
+- **Nettoyage des fragments** (voir plus haut) : c'est précisément une coupure
+  en plein transfert qui les crée. Les deux mécanismes vont ensemble.
+
+Si les erreurs persistent, l'ordre à essayer dans les réglages : *délai pendant
+un transfert* à 300 s, puis *envois simultanés* à 1 — sur une liaison saturée,
+trois transferts parallèles se gênent plus qu'ils n'accélèrent.
+
 ---
 
 ## Développement
@@ -236,7 +258,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-136 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+143 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

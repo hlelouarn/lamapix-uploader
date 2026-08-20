@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import ftplib
 import re
+import socket
 import ssl
 from pathlib import Path, PurePosixPath
 
 TAILLE_BLOC = 65536
-TIMEOUT_PAR_DEFAUT = 30
+TIMEOUT_CONNEXION_PAR_DEFAUT = 30
+TIMEOUT_DONNEES_PAR_DEFAUT = 180
+
+# Keepalive sur la connexion de commande : pendant l'envoi d'une photo, elle
+# reste inactive. Un NAT opérateur (le CGNAT de Starlink, par exemple) peut
+# alors oublier la correspondance, et le serveur ferme — WinError 10054 pile au
+# moment où l'on attend son accusé de réception.
+KEEPALIVE_INACTIVITE_MS = 30_000
+KEEPALIVE_INTERVALLE_MS = 3_000
 
 
 class ErreurFtp(Exception):
@@ -74,7 +83,8 @@ class ClientFtps:
         mot_de_passe: str,
         racine: str,
         ignorer_certificat: bool = False,
-        timeout: int = TIMEOUT_PAR_DEFAUT,
+        timeout: int = TIMEOUT_CONNEXION_PAR_DEFAUT,
+        timeout_donnees: int = TIMEOUT_DONNEES_PAR_DEFAUT,
     ) -> None:
         self.hote = hote
         self.port = port
@@ -83,6 +93,7 @@ class ClientFtps:
         self.racine = racine.strip("/")
         self.ignorer_certificat = ignorer_certificat
         self.timeout = timeout
+        self.timeout_donnees = timeout_donnees
         self._ftp: ftplib.FTP_TLS | None = None
         self._dossiers_crees: set[str] = set()
 
@@ -99,6 +110,12 @@ class ClientFtps:
             ftp.login(self.utilisateur, self._mot_de_passe)
             ftp.prot_p()                  # canal de données chiffré aussi
             ftp.set_pasv(True)
+            self._activer_keepalive(ftp.sock)
+            # ftplib réutilise `timeout` pour la connexion de données : on passe
+            # au délai « transfert » une fois la session ouverte.
+            ftp.timeout = self.timeout_donnees
+            if ftp.sock is not None:
+                ftp.sock.settimeout(self.timeout_donnees)
         except ftplib.error_perm as exc:
             self._fermer_silencieusement(ftp)
             if str(exc).startswith("530"):
@@ -115,6 +132,21 @@ class ClientFtps:
             self._fermer_silencieusement(self._ftp)
             self._ftp = None
         self._dossiers_crees.clear()
+
+    @staticmethod
+    def _activer_keepalive(sock) -> None:
+        """Maintient la connexion de commande vivante pendant les transferts."""
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+                sock.ioctl(
+                    socket.SIO_KEEPALIVE_VALS,
+                    (1, KEEPALIVE_INACTIVITE_MS, KEEPALIVE_INTERVALLE_MS),
+                )
+        except OSError:
+            pass  # confort, pas une condition de fonctionnement
 
     @staticmethod
     def _fermer_silencieusement(ftp: ftplib.FTP_TLS) -> None:
