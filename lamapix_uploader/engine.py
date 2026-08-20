@@ -27,7 +27,7 @@ from .ftp import (
     ErreurIdentifiants,
     ErreurLiaison,
 )
-from .journal import Journal
+from .journal import Diagnostic, Journal
 from .mapping import chemin_distant, rendre_unique
 from .memory import MemoireEvenement
 from .scanner import PhotoTrouvee, lister_evenements, scanner
@@ -130,6 +130,8 @@ class Moteur:
         self._epreuves_signalees: set[str] = set()
         self._a_reprendre: str | None = None
         self._dernier_scan: list[PhotoTrouvee] = []
+        self._dernier_scan_a = float("-inf")   # monotonic du dernier scan réel
+        self.diagnostic = Diagnostic()
 
     # ================================================================ cycle de vie
 
@@ -332,8 +334,21 @@ class Moteur:
             self._noter(f"Dossier introuvable (réseau coupé ?) : {source}")
             return 5.0
 
-        self._noter("Scan du dossier…")
-        self._preparer_tampon(source, memoire)
+        debut_tour = time.monotonic()
+
+        # Tant qu'il reste un arriéré à envoyer, on ne re-scanne qu'une fois par
+        # intervalle : sinon chaque fenêtre d'envoi se termine par un scan qui
+        # suspend les transferts, et l'utilisateur voit l'outil « s'arrêter pour
+        # scanner » toutes les cinq minutes.
+        with self._verrou:
+            arriere = memoire.nombre_en_attente > 0
+        scan_recent = time.monotonic() - self._dernier_scan_a < self.config.intervalle_scan
+        if arriere and scan_recent:
+            self.diagnostic.tracer("SCAN_SAUTE", en_attente=memoire.nombre_en_attente)
+        else:
+            self._noter("Scan du dossier…")
+            self._preparer_tampon(source, memoire)
+            self._dernier_scan_a = time.monotonic()
         self._purger_tampon(memoire)
 
         if self._en_pause:
@@ -344,7 +359,32 @@ class Moteur:
         # En dernier : ce n'est qu'un confort d'affichage, et lire un partage
         # réseau éteint peut coûter très cher en temps.
         self._rafraichir_evenements()
-        return float(self.config.intervalle_scan)
+
+        delai = self._prochain_delai(memoire)
+        with self._verrou:
+            restantes = memoire.nombre_en_attente
+        self.diagnostic.tracer(
+            "TOUR",
+            duree_ms=int((time.monotonic() - debut_tour) * 1000),
+            en_attente=restantes,
+            prochain_s=int(delai),
+        )
+        return delai
+
+    def _prochain_delai(self, memoire: MemoireEvenement) -> float:
+        """1 s s'il reste des photos prêtes à partir, 5 s si tout attend une
+        reprise, sinon le rythme de scan normal. Les fenêtres d'envoi
+        s'enchaînent au lieu d'être entrecoupées de 30 s de vide."""
+        if self._en_pause:
+            return float(self.config.intervalle_scan)
+        with self._verrou:
+            en_attente = [e.rel for e in memoire.entrees.values() if not e.envoyee]
+        if not en_attente:
+            return float(self.config.intervalle_scan)
+        maintenant = time.monotonic()
+        if any(not self._en_cooldown(rel, maintenant) for rel in en_attente):
+            return 1.0
+        return 5.0
 
     # ------------------------------------------------------- 1. scan + tampon
 
@@ -357,7 +397,13 @@ class Moteur:
 
     def _preparer_tampon(self, source: Path, memoire: MemoireEvenement) -> None:
         """Copie les nouveautés dans le tampon, structuré comme le FTP."""
+        debut_scan = time.monotonic()
         photos = self._scanner(source)
+        self.diagnostic.tracer(
+            "SCAN",
+            detectees=len(photos),
+            duree_ms=int((time.monotonic() - debut_scan) * 1000),
+        )
         with self._verrou:
             self._detectees = len(photos)
             self._dernier_scan = photos
@@ -399,6 +445,10 @@ class Moteur:
             modifiee = True
 
         if modifiee:
+            self.diagnostic.tracer(
+                "COPIE",
+                duree_ms=int((time.monotonic() - debut_scan) * 1000),
+            )
             with self._verrou:
                 memoire.sauver()
 
@@ -491,6 +541,7 @@ class Moteur:
             return
 
         self._noter(f"Envoi en cours — {len(file)} photo(s) en attente…")
+        self.diagnostic.tracer("FENETRE", file=len(file))
         echeance = time.monotonic() + self.config.rescan_max
         verrou_file = threading.Lock()
 
@@ -634,8 +685,14 @@ class Moteur:
         with self._verrou:
             self._en_cours = rel
 
+        try:
+            octets = fichier.stat().st_size
+        except OSError:
+            octets = -1
+
         derniere: str = ""
         for essai in range(1, self.config.essais_max + 1):
+            debut_essai = time.monotonic()
             try:
                 if essai > 1:
                     # Connexion neuve : Lamapix a pu consommer les dossiers, et une
@@ -643,6 +700,13 @@ class Moteur:
                     client.fermer(poli=False)
                     client.invalider_cache(parent)
                 client.envoyer(fichier, rel)
+                self.diagnostic.tracer(
+                    "ENVOI_OK",
+                    duree_ms=int((time.monotonic() - debut_essai) * 1000),
+                    octets=octets,
+                    essai=essai,
+                    rel=rel,
+                )
                 self._noter_succes(memoire, source, rel)
                 return "ok"
             except ErreurIdentifiants as exc:
@@ -669,12 +733,23 @@ class Moteur:
                 # Le LIEN est tombé, pas la photo. Le client a déjà jeté sa
                 # session morte ; le disjoncteur prend le relais : la photo
                 # repart en tête de file, aucun compteur d'échec ne bouge.
+                self.diagnostic.tracer(
+                    "ENVOI_LIEN",
+                    duree_ms=int((time.monotonic() - debut_essai) * 1000),
+                    rel=rel,
+                )
                 if self._noter_liaison(rel, str(exc)):
                     derniere = str(exc)
                     break        # photo pathologique : échec normal
                 return "liaison"
             except ErreurFtp as exc:
                 derniere = str(exc)
+                self.diagnostic.tracer(
+                    "ENVOI_KO",
+                    duree_ms=int((time.monotonic() - debut_essai) * 1000),
+                    essai=essai,
+                    rel=rel,
+                )
                 self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")
                 if essai < self.config.essais_max and not self._arret.is_set():
                     time.sleep(self._attente_entre_essais(essai))
@@ -755,6 +830,9 @@ class Moteur:
             if pathologique:
                 self._liaisons_fichier.pop(rel, None)
         self.journal.ecrire(f"Liaison interrompue — {rel} : {message}")
+        self.diagnostic.tracer(
+            "LIAISON", pannes=self._pannes_liaison, sonde_dans_s=int(delai)
+        )
         return pathologique
 
     def _noter_echec(self, rel: str, parent: str, message: str) -> None:
@@ -832,7 +910,9 @@ class Moteur:
             self._derniere_erreur = ""
             connues = len(self._memoire.entrees)
 
+        self._dernier_scan_a = float("-inf")
         self.journal.rediriger(paths.racine_journaux() / f"{nom}.txt")
+        self.diagnostic.rediriger(paths.racine_journaux() / f"diagnostic_{nom}.txt")
         self.journal.ecrire(
             f"Événement surveillé : {nom} | dossier : {source} "
             f"| mémoire : {connues} photo(s) connue(s)"

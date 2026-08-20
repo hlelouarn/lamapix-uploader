@@ -257,6 +257,17 @@ timed out`. Le piège est que **toutes** les photos échouent en même temps.
 - **Nettoyage des fragments** (voir plus haut) : c'est précisément une coupure
   en plein transfert qui les crée. Les deux mécanismes vont ensemble.
 
+**Le scan ne suspend plus les envois.** Tant qu'il reste un arriéré, les
+fenêtres d'envoi s'enchaînent (1 s d'écart) et le dossier n'est re-scanné
+qu'une fois par intervalle — plus de pause de 30 s ni de scan entre chaque
+fenêtre de cinq minutes.
+
+**Quand « c'est lent » : envoyer le diagnostic.** L'outil écrit en continu
+`donnees\journaux\diagnostic_<EVENEMENT>.txt` : chaque scan, chaque copie,
+chaque envoi y est chronométré à la milliseconde (`ENVOI_OK duree_ms=… octets=…`,
+`SCAN duree_ms=…`, `LIAISON…`, `TOUR…`). C'est ce fichier qu'il faut fournir
+pour analyser une lenteur — il désigne le coupable au lieu de le faire deviner.
+
 Si le débit reste faible malgré tout, passer *envois simultanés* à **3** dans les
 réglages : un ouvrier immobilisé par une coupure pèse alors un tiers du débit au
 lieu de la moitié.
@@ -278,7 +289,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-159 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+164 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

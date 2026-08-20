@@ -7,17 +7,20 @@ et on propose de le remplacer.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -38,11 +41,28 @@ class DialogueReglages(QDialog):
         self.setMinimumWidth(560)
         self._mot_de_passe_saisi: str | None = None
 
+        # Les réglages dépassent l'écran des portables de terrain : le contenu
+        # défile, les boutons Enregistrer/Annuler restent TOUJOURS visibles.
+        contenu = QWidget()
+        colonne = QVBoxLayout(contenu)
+        colonne.addWidget(self._groupe_source())
+        colonne.addWidget(self._groupe_lamapix())
+        colonne.addWidget(self._groupe_rythme())
+        colonne.addWidget(self._groupe_divers())
+        colonne.addStretch(1)
+
+        defilement = QScrollArea()
+        defilement.setWidgetResizable(True)
+        defilement.setFrameShape(QFrame.Shape.NoFrame)
+        defilement.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        defilement.setWidget(contenu)
+
         disposition = QVBoxLayout(self)
-        disposition.addWidget(self._groupe_source())
-        disposition.addWidget(self._groupe_lamapix())
-        disposition.addWidget(self._groupe_rythme())
-        disposition.addWidget(self._groupe_divers())
+        disposition.addWidget(defilement, 1)
+
+        ecran = QGuiApplication.primaryScreen()
+        hauteur_dispo = ecran.availableGeometry().height() if ecran else 800
+        self.resize(660, min(860, hauteur_dispo - 80))
 
         boutons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

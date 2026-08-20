@@ -462,6 +462,9 @@ class TestPurge:
 
         serveur.echecs_pour[maudite] = 0
         moteur._pause_fichier.clear()
+        # La reconstitution attend le prochain VRAI scan (ils sont espacés d'un
+        # intervalle quand un arriéré existe) : on simule l'intervalle écoulé.
+        moteur._dernier_scan_a = float("-inf")
         moteur._un_tour()
 
         assert maudite in serveur.fichiers
@@ -711,3 +714,73 @@ class TestCoupureNeGelePasLaFile:
 
         # Les reconnexions entre tentatives ferment sans attendre le serveur.
         assert serveur.fermetures_brutales >= 2
+
+
+class TestRythmeDesTours:
+    """Le reproche du terrain : « il scanne en arrêtant les transferts ». Tant
+    qu'il reste un arriéré, les fenêtres d'envoi doivent s'enchaîner — pas être
+    entrecoupées de 30 s de vide et d'un scan à chaque fois."""
+
+    def test_pas_de_pause_longue_quand_il_reste_du_travail(
+        self, source, fabrique_moteur, monkeypatch
+    ):
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, intervalle_scan=30)
+        monkeypatch.setattr(moteur, "_envoyer_la_file", lambda memoire: None)
+
+        assert moteur._un_tour() == 1.0
+
+    def test_pause_normale_quand_tout_est_parti(self, source, fabrique_moteur):
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, intervalle_scan=30)
+
+        assert moteur._un_tour() == 30.0
+
+    def test_pause_courte_quand_tout_attend_une_reprise(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Photos en cooldown : inutile de tourner à vide chaque seconde, mais
+        30 s seraient trop — on revient dans 5 s."""
+        serveur.echecs_pour["2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"] = 99
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, essais_max=1, intervalle_scan=30)
+
+        assert moteur._un_tour() == 5.0
+
+    def test_le_scan_nest_pas_refait_tant_quil_reste_un_arriere(
+        self, source, fabrique_moteur, monkeypatch
+    ):
+        """Deux fenêtres d'envoi qui s'enchaînent ne doivent pas être séparées
+        par un scan : c'est lui qui suspendait les transferts."""
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, intervalle_scan=30)
+        monkeypatch.setattr(moteur, "_envoyer_la_file", lambda memoire: None)
+
+        moteur._un_tour()                       # premier scan : 1 détectée
+        poser_photo(source, PHOTO_B)            # arrive pendant l'envoi
+        moteur._un_tour()                       # arriéré + scan récent : sauté
+        assert moteur.etat().detectees == 1
+
+        moteur._dernier_scan_a = float("-inf")  # l'intervalle s'est écoulé
+        moteur._un_tour()
+        assert moteur.etat().detectees == 2
+
+    def test_le_diagnostic_enregistre_les_durees(
+        self, source, serveur, fabrique_moteur, racine_isolee
+    ):
+        """Le fichier qu'on demande à l'utilisateur d'envoyer quand « c'est
+        lent » : il doit exister et contenir les étapes chronométrées."""
+        poser_photo(source, PHOTO_A)
+        serveur.panne_globale = 1
+        moteur = fabrique_moteur(source)
+        moteur._un_tour()
+
+        fichier = (
+            racine_isolee / "donnees" / "journaux"
+            / "diagnostic_2026-08-02GRANDPRIX.txt"
+        )
+        contenu = fichier.read_text(encoding="utf-8")
+        assert "SCAN " in contenu and "duree_ms=" in contenu
+        assert "ENVOI_OK" in contenu and "octets=" in contenu
+        assert "LIAISON" in contenu
+        assert "TOUR" in contenu
