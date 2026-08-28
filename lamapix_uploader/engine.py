@@ -3,6 +3,12 @@
 Il tourne dans son propre thread et ne connaît rien de l'interface : celle-ci
 lui pousse des commandes et lit `etat()`. Fermer la fenêtre n'arrête donc rien.
 
+Depuis la v2.0, le moteur surveille une LISTE d'événements (0, 1 ou plusieurs) :
+un seul pool de connexions et un seul disjoncteur pour tous — la ressource rare
+est le lien, pas les événements — et une alternance équitable entre eux dans la
+file d'envoi. Mémoire, tampon et boutons Initialiser/Réinitialiser restent par
+événement. Tout dossier hors de la liste n'existe pas pour l'outil.
+
 Le tampon local est structuré EXACTEMENT comme le FTP : c'est le plan B du brief
 (glisser son contenu dans FileZilla doit donner le même résultat).
 """
@@ -51,11 +57,24 @@ MAX_LIAISONS_PAR_PHOTO = 5
 
 
 @dataclass
+class ContexteEvenement:
+    """Tout ce qui appartient en propre à un événement surveillé."""
+
+    nom: str
+    source: Path
+    tampon: Path
+    memoire: MemoireEvenement
+
+
+@dataclass
 class Etat:
     """Photo instantanée pour l'interface. Immuable, lisible sans verrou."""
 
-    evenement: str | None = None
-    source: str | None = None
+    evenement: str | None = None            # nom si UN SEUL événement surveillé
+    source: str | None = None               # idem
+    surveilles: list[str] = field(default_factory=list)
+    # (nom, détectées, envoyées, en attente) — dans l'ordre d'ajout
+    par_evenement: list[tuple[str, int, int, int]] = field(default_factory=list)
     evenements_disponibles: list[str] = field(default_factory=list)
     detectees: int = 0
     envoyees: int = 0
@@ -82,7 +101,7 @@ class Etat:
 
 
 class Moteur:
-    """Orchestre tout le pipeline. Une instance = un événement surveillé à la fois."""
+    """Orchestre tout le pipeline pour l'ensemble des événements surveillés."""
 
     def __init__(
         self,
@@ -102,12 +121,14 @@ class Moteur:
         self._reveil = threading.Event()
         self._thread: threading.Thread | None = None
 
-        self._memoire: MemoireEvenement | None = None
-        self._dossier_source: Path | None = None
-        self._dossier_tampon: Path | None = None
+        # nom -> contexte, dans l'ordre d'ajout (l'alternance suit cet ordre).
+        self._contextes: dict[str, ContexteEvenement] = {}
 
         self._en_pause = False
-        self._detectees = 0
+        self._detectees: dict[str, int] = {}
+        # Toutes les tables ci-dessous sont indexées par le chemin AFFICHÉ
+        # (« ÉVÉNEMENT/CAVALIER/photo.jpg ») : unique entre événements, et c'est
+        # aussi le chemin réellement parlé au serveur depuis la v2.0.
         self._erreurs: dict[str, str] = {}
         self._derniere_erreur = ""
         self._en_cours = ""
@@ -119,7 +140,7 @@ class Moteur:
         self._echecs_fichier: dict[str, int] = {}
         self._echecs_dossier_suite: dict[str, int] = {}
         self._liaisons_fichier: dict[str, int] = {}
-        self._pannes_liaison = 0        # consécutives, toutes photos confondues
+        self._pannes_liaison = 0        # consécutives, tous événements confondus
         self._prochaine_sonde = 0.0
         self._sonde_prise = False
         self._envois_recents: deque[float] = deque()
@@ -128,23 +149,48 @@ class Moteur:
         self._evenements_disponibles: list[str] = []
         self._prochaine_liste = 0.0
         self._epreuves_signalees: set[str] = set()
-        self._a_reprendre: str | None = None
-        self._dernier_scan: list[PhotoTrouvee] = []
+        self._a_reprendre: list[str] = []
+        self._dernier_scan: dict[str, list[PhotoTrouvee]] = {}
         self._dernier_scan_a = float("-inf")   # monotonic du dernier scan réel
         self.diagnostic = Diagnostic()
+
+    # ------------------------------------------------------- compat & accès ctx
+
+    @property
+    def _memoire(self) -> MemoireEvenement | None:
+        """La mémoire quand UN SEUL événement est surveillé (tests, dialogues)."""
+        with self._verrou:
+            if len(self._contextes) == 1:
+                return next(iter(self._contextes.values())).memoire
+        return None
+
+    def _contexte(self, nom: str | None) -> ContexteEvenement | None:
+        """Le contexte demandé — ou l'unique surveillé quand `nom` est None."""
+        with self._verrou:
+            if nom is not None:
+                return self._contextes.get(nom)
+            if len(self._contextes) == 1:
+                return next(iter(self._contextes.values()))
+        return None
+
+    @staticmethod
+    def _afficher(nom: str, rel: str) -> str:
+        """Chemin unique inter-événements — et chemin distant réel (racine FTP =
+        la racine du compte, l'événement est le premier dossier)."""
+        return f"{nom}/{rel}"
 
     # ================================================================ cycle de vie
 
     def demarrer(self) -> None:
         """Démarre le moteur sans jamais toucher au disque depuis l'appelant.
 
-        La reprise de l'événement précédent se fait DANS le thread : un partage
+        La reprise des événements précédents se fait DANS le thread : un partage
         réseau éteint fait attendre le timeout SMB (plusieurs dizaines de
         secondes), et l'interface doit rester utilisable pendant ce temps.
         """
         if self._thread is not None:
             return
-        self._a_reprendre = self.config.dossier_source
+        self._a_reprendre = list(self.config.dossiers_surveilles)
         self._thread = threading.Thread(target=self._boucle, name="moteur", daemon=True)
         self._thread.start()
 
@@ -155,19 +201,57 @@ class Moteur:
             self._thread.join(timeout=delai)
             self._thread = None
         with self._verrou:
-            if self._memoire is not None:
-                self._memoire.sauver()
+            for ctx in self._contextes.values():
+                ctx.memoire.sauver()
 
     # =================================================================== commandes
 
-    def choisir_evenement(self, saisie: str) -> None:
-        try:
-            _, source = self.config.resoudre_source(saisie)
-        except ValueError as exc:
-            self._noter_erreur(str(exc))
-            return
-        self._ouvrir_evenement(source, memoriser=True)
+    def ajouter_evenement(self, saisie: str) -> None:
+        """Ajoute un événement à la liste de surveillance."""
+        self._ouvrir_evenement(saisie, memoriser=True)
         self._reveil.set()
+
+    def retirer_evenement(self, nom: str) -> None:
+        """Retire un événement de la surveillance. RIEN n'est effacé : mémoire et
+        tampon restent sur disque, le re-surveiller reprend où il en était."""
+        with self._verrou:
+            ctx = self._contextes.pop(nom, None)
+            if ctx is None:
+                return
+            ctx.memoire.sauver()
+            self._detectees.pop(nom, None)
+            self._dernier_scan.pop(nom, None)
+            prefixe = f"{nom}/"
+            for table in (
+                self._erreurs,
+                self._pause_fichier,
+                self._pause_dossier,
+                self._echecs_dossier,
+                self._echecs_fichier,
+                self._echecs_dossier_suite,
+                self._liaisons_fichier,
+            ):
+                for cle in [c for c in table if c.startswith(prefixe)]:
+                    del table[cle]
+        self.config.dossiers_surveilles = [
+            c for c in self.config.dossiers_surveilles
+            if Path(c).name != nom
+        ]
+        self.config.sauver()
+        self.journal.ecrire(f"Événement retiré de la surveillance : {nom} (mémoire conservée)")
+        self._reveil.set()
+
+    def choisir_evenement(self, saisie: str) -> None:
+        """Remplace TOUTE la surveillance par cet unique événement.
+
+        C'est l'ancien geste mono-événement ; l'interface v2 passe par
+        ajouter/retirer, mais ce raccourci reste le bon outil quand on veut
+        « juste surveiller ça »."""
+        with self._verrou:
+            noms = list(self._contextes)
+        for nom in noms:
+            self.retirer_evenement(nom)
+        self.ajouter_evenement(saisie)
 
     def basculer_pause(self) -> bool:
         with self._verrou:
@@ -177,25 +261,32 @@ class Moteur:
         self._reveil.set()
         return etat
 
-    def photos_connues(self) -> list[PhotoTrouvee]:
-        """Le dernier scan, tel quel. Sert aux aperçus de l'interface sans
+    def photos_connues(self, nom: str | None = None) -> list[PhotoTrouvee]:
+        """Le dernier scan d'un événement. Sert aux aperçus de l'interface sans
         relancer une lecture disque (coûteuse sur un partage réseau)."""
+        ctx = self._contexte(nom)
+        if ctx is None:
+            return []
         with self._verrou:
-            return list(self._dernier_scan)
+            return list(self._dernier_scan.get(ctx.nom, []))
 
-    def apercu_initialisation(self, avant: float | None = None) -> tuple[int, int]:
+    def apercu_initialisation(
+        self, avant: float | None = None, nom: str | None = None
+    ) -> tuple[int, int]:
         """(nombre concerné, nombre total présent) pour une frontière donnée.
 
         `avant` est un timestamp : seules les photos modifiées avant lui seraient
         marquées. None = toutes.
         """
-        photos = self.photos_connues()
+        photos = self.photos_connues(nom)
         if avant is None:
             return len(photos), len(photos)
         return sum(1 for p in photos if p.modifie_le < avant), len(photos)
 
-    def initialiser_memoire(self, avant: float | None = None) -> int:
-        """Déclare l'existant comme déjà envoyé, SANS rien envoyer.
+    def initialiser_memoire(
+        self, avant: float | None = None, nom: str | None = None
+    ) -> int:
+        """Déclare l'existant d'UN événement comme déjà envoyé, SANS rien envoyer.
 
         Ce n'est pas une constatation : Lamapix aspirant ce qu'on y dépose, aucune
         vérification n'est possible côté serveur. C'est le pari « Kadra avait fini
@@ -203,19 +294,17 @@ class Moteur:
         réellement arrêté plutôt que d'avaler tout le dossier ; et
         `annuler_initialisation()` permet d'en revenir.
         """
-        with self._verrou:
-            memoire = self._memoire
-            source = self._dossier_source
-        if memoire is None or source is None:
+        ctx = self._contexte(nom)
+        if ctx is None:
             return 0
 
         # On repart du dernier scan quand il existe : l'aperçu montré à
         # l'utilisateur et ce qu'on marque portent alors sur exactement le
         # même ensemble de photos.
-        photos_sources = self.photos_connues() or self._scanner(source)
+        photos_sources = self.photos_connues(ctx.nom) or self._scanner(ctx.source)
 
         photos = []
-        rels = dict(memoire.rels_utilises)
+        rels = dict(ctx.memoire.rels_utilises)
         for photo in photos_sources:
             if avant is not None and photo.modifie_le >= avant:
                 continue
@@ -227,42 +316,46 @@ class Moteur:
             photos.append((str(photo.chemin), rel, photo.taille))
 
         with self._verrou:
-            nombre = memoire.marquer_tout_envoye(photos)
+            nombre = ctx.memoire.marquer_tout_envoye(photos)
         frontiere = (
             "tout le dossier"
             if avant is None
             else f"photos antérieures au {datetime.fromtimestamp(avant):%d/%m/%Y %H:%M}"
         )
         self.journal.ecrire(
-            f"Initialisation ({frontiere}) : {nombre} photo(s) déclarée(s) déjà "
-            "envoyée(s) — rien n'a été envoyé, geste annulable"
+            f"Initialisation de {ctx.nom} ({frontiere}) : {nombre} photo(s) "
+            "déclarée(s) déjà envoyée(s) — rien n'a été envoyé, geste annulable"
         )
         return nombre
 
-    def annuler_initialisation(self) -> int:
+    def annuler_initialisation(self, nom: str | None = None) -> int:
         """Renvoie dans la file ce qu'une initialisation avait mis de côté."""
+        ctx = self._contexte(nom)
+        if ctx is None:
+            return 0
         with self._verrou:
-            if self._memoire is None:
-                return 0
-            nombre = self._memoire.annuler_initialisation()
+            nombre = ctx.memoire.annuler_initialisation()
         if nombre:
             self.journal.ecrire(
-                f"Initialisation annulée : {nombre} photo(s) remise(s) en file d'attente"
+                f"Initialisation de {ctx.nom} annulée : {nombre} photo(s) "
+                "remise(s) en file d'attente"
             )
             self._reveil.set()
         return nombre
 
-    def reinitialiser_memoire(self) -> None:
-        """Efface la mémoire : tout l'événement sera renvoyé."""
+    def reinitialiser_memoire(self, nom: str | None = None) -> None:
+        """Efface la mémoire d'UN événement : il sera intégralement renvoyé."""
+        ctx = self._contexte(nom)
+        if ctx is None:
+            return
+        prefixe = f"{ctx.nom}/"
         with self._verrou:
-            if self._memoire is None:
-                return
-            self._memoire.effacer()
-            self._erreurs.clear()
-            self._pause_fichier.clear()
-            self._pause_dossier.clear()
-            self._echecs_dossier.clear()
-        self.journal.ecrire("Mémoire effacée : renvoi complet de l'événement")
+            ctx.memoire.effacer()
+            for table in (self._erreurs, self._pause_fichier, self._pause_dossier,
+                          self._echecs_dossier, self._echecs_fichier):
+                for cle in [c for c in table if c.startswith(prefixe)]:
+                    del table[cle]
+        self.journal.ecrire(f"Mémoire de {ctx.nom} effacée : renvoi complet de l'événement")
         self._reveil.set()
 
     def recharger_config(self) -> None:
@@ -274,20 +367,31 @@ class Moteur:
 
     def etat(self) -> Etat:
         with self._verrou:
-            memoire = self._memoire
-            envoyees = memoire.nombre_envoyees if memoire else 0
-            en_attente = memoire.nombre_en_attente if memoire else 0
-            initialisees = memoire.nombre_initialisees if memoire else 0
+            contextes = list(self._contextes.values())
+            par_evenement = [
+                (
+                    ctx.nom,
+                    self._detectees.get(ctx.nom, 0),
+                    ctx.memoire.nombre_envoyees,
+                    ctx.memoire.nombre_en_attente,
+                )
+                for ctx in contextes
+            ]
             self._elaguer_debit()
+            unique = contextes[0] if len(contextes) == 1 else None
             return Etat(
-                evenement=self.config.evenement,
-                source=str(self._dossier_source) if self._dossier_source else None,
+                evenement=unique.nom if unique else None,
+                source=str(unique.source) if unique else None,
+                surveilles=[ctx.nom for ctx in contextes],
+                par_evenement=par_evenement,
                 evenements_disponibles=list(self._evenements_disponibles),
-                detectees=self._detectees,
-                envoyees=envoyees,
-                en_attente=en_attente,
+                detectees=sum(n for _, n, _, _ in par_evenement),
+                envoyees=sum(n for _, _, n, _ in par_evenement),
+                en_attente=sum(n for _, _, _, n in par_evenement),
                 erreurs=len(self._erreurs),
-                initialisees=initialisees,
+                initialisees=sum(
+                    ctx.memoire.nombre_initialisees for ctx in contextes
+                ),
                 derniere_erreur=self._derniere_erreur,
                 en_cours=self._en_cours,
                 note=self._note,
@@ -303,10 +407,10 @@ class Moteur:
     # =============================================================== boucle privée
 
     def _boucle(self) -> None:
-        if self._a_reprendre:
-            self._noter("Reprise de l'événement précédent…")
-            self._ouvrir_evenement(self._a_reprendre, memoriser=False)
-            self._a_reprendre = None
+        for source in self._a_reprendre:
+            self._noter("Reprise des événements surveillés…")
+            self._ouvrir_evenement(source, memoriser=False)
+        self._a_reprendre = []
         while not self._arret.is_set():
             try:
                 attente = self._un_tour()
@@ -322,16 +426,22 @@ class Moteur:
         C'est le point d'entrée testable du moteur : il ne dort jamais lui-même.
         """
         with self._verrou:
-            source = self._dossier_source
-            memoire = self._memoire
+            contextes = list(self._contextes.values())
 
-        if source is None or memoire is None:
-            self._noter("Choisissez un dossier d'événement à surveiller.")
+        if not contextes:
+            self._noter("Ajoutez un dossier d'événement à surveiller.")
             self._rafraichir_evenements()
             return 2.0
 
-        if not source.exists():
-            self._noter(f"Dossier introuvable (réseau coupé ?) : {source}")
+        # Un partage réseau éteint sur UN événement ne doit pas priver les
+        # autres : on continue avec ce qui est joignable.
+        joignables = []
+        for ctx in contextes:
+            if ctx.source.exists():
+                joignables.append(ctx)
+            else:
+                self._noter(f"Dossier introuvable (réseau coupé ?) : {ctx.source}")
+        if not joignables:
             return 5.0
 
         debut_tour = time.monotonic()
@@ -341,28 +451,32 @@ class Moteur:
         # suspend les transferts, et l'utilisateur voit l'outil « s'arrêter pour
         # scanner » toutes les cinq minutes.
         with self._verrou:
-            arriere = memoire.nombre_en_attente > 0
+            arriere = any(ctx.memoire.nombre_en_attente > 0 for ctx in joignables)
         scan_recent = time.monotonic() - self._dernier_scan_a < self.config.intervalle_scan
         if arriere and scan_recent:
-            self.diagnostic.tracer("SCAN_SAUTE", en_attente=memoire.nombre_en_attente)
+            self.diagnostic.tracer(
+                "SCAN_SAUTE",
+                en_attente=sum(ctx.memoire.nombre_en_attente for ctx in joignables),
+            )
         else:
-            self._noter("Scan du dossier…")
-            self._preparer_tampon(source, memoire)
+            self._noter("Scan des dossiers…")
+            for ctx in joignables:
+                self._preparer_tampon(ctx)
             self._dernier_scan_a = time.monotonic()
-        self._purger_tampon(memoire)
+        self._purger_tampons(joignables)
 
         if self._en_pause:
             self._noter("EN PAUSE — les envois sont suspendus, le scan continue.")
         else:
-            self._envoyer_la_file(memoire)
+            self._envoyer_la_file(joignables)
 
         # En dernier : ce n'est qu'un confort d'affichage, et lire un partage
         # réseau éteint peut coûter très cher en temps.
         self._rafraichir_evenements()
 
-        delai = self._prochain_delai(memoire)
+        delai = self._prochain_delai(joignables)
         with self._verrou:
-            restantes = memoire.nombre_en_attente
+            restantes = sum(ctx.memoire.nombre_en_attente for ctx in joignables)
         self.diagnostic.tracer(
             "TOUR",
             duree_ms=int((time.monotonic() - debut_tour) * 1000),
@@ -371,18 +485,23 @@ class Moteur:
         )
         return delai
 
-    def _prochain_delai(self, memoire: MemoireEvenement) -> float:
+    def _prochain_delai(self, contextes: list[ContexteEvenement]) -> float:
         """1 s s'il reste des photos prêtes à partir, 5 s si tout attend une
         reprise, sinon le rythme de scan normal. Les fenêtres d'envoi
         s'enchaînent au lieu d'être entrecoupées de 30 s de vide."""
         if self._en_pause:
             return float(self.config.intervalle_scan)
         with self._verrou:
-            en_attente = [e.rel for e in memoire.entrees.values() if not e.envoyee]
+            en_attente = [
+                self._afficher(ctx.nom, e.rel)
+                for ctx in contextes
+                for e in ctx.memoire.entrees.values()
+                if not e.envoyee
+            ]
         if not en_attente:
             return float(self.config.intervalle_scan)
         maintenant = time.monotonic()
-        if any(not self._en_cooldown(rel, maintenant) for rel in en_attente):
+        if any(not self._en_cooldown(aff, maintenant) for aff in en_attente):
             return 1.0
         return 5.0
 
@@ -395,22 +514,21 @@ class Moteur:
             delai_stabilite=self.config.delai_stabilite,
         )
 
-    def _preparer_tampon(self, source: Path, memoire: MemoireEvenement) -> None:
-        """Copie les nouveautés dans le tampon, structuré comme le FTP."""
+    def _preparer_tampon(self, ctx: ContexteEvenement) -> None:
+        """Copie les nouveautés d'un événement dans son tampon, structuré comme le FTP."""
         debut_scan = time.monotonic()
-        photos = self._scanner(source)
+        photos = self._scanner(ctx.source)
         self.diagnostic.tracer(
             "SCAN",
+            evt=ctx.nom,
             detectees=len(photos),
             duree_ms=int((time.monotonic() - debut_scan) * 1000),
         )
         with self._verrou:
-            self._detectees = len(photos)
-            self._dernier_scan = photos
-        tampon = self._dossier_tampon
-        if tampon is None:
-            return
+            self._detectees[ctx.nom] = len(photos)
+            self._dernier_scan[ctx.nom] = photos
 
+        memoire = ctx.memoire
         modifiee = False
         for photo in photos:
             cle = str(photo.chemin)
@@ -419,7 +537,7 @@ class Moteur:
             deja_a_jour = entree is not None and entree.taille == photo.taille
 
             # Cas nominal : connue, inchangée, et son tampon est bien là.
-            if deja_a_jour and (entree.envoyee or (tampon / entree.rel).exists()):
+            if deja_a_jour and (entree.envoyee or (ctx.tampon / entree.rel).exists()):
                 continue
 
             if entree is not None:
@@ -427,17 +545,17 @@ class Moteur:
             else:
                 calcule = chemin_distant(photo.relatif)
                 if calcule is None:
-                    self._signaler_photo_non_rangeable(photo)
+                    self._signaler_photo_non_rangeable(ctx.nom, photo)
                     continue
                 with self._verrou:
                     rel = rendre_unique(calcule, cle, memoire.rels_utilises)
 
-            cible = tampon / rel
+            cible = ctx.tampon / rel
             try:
                 cible.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(photo.chemin, cible)
             except OSError as exc:
-                self.journal.erreur(f"copie vers le tampon — {rel} : {exc}")
+                self.journal.erreur(f"copie vers le tampon — {ctx.nom}/{rel} : {exc}")
                 continue
 
             with self._verrou:
@@ -447,63 +565,67 @@ class Moteur:
         if modifiee:
             self.diagnostic.tracer(
                 "COPIE",
+                evt=ctx.nom,
                 duree_ms=int((time.monotonic() - debut_scan) * 1000),
             )
             with self._verrou:
                 memoire.sauver()
 
-    def _signaler_photo_non_rangeable(self, photo: PhotoTrouvee) -> None:
+    def _signaler_photo_non_rangeable(self, nom: str, photo: PhotoTrouvee) -> None:
         """Photo dans une épreuve sans dossier cavalier : on prévient une fois."""
-        epreuve = Path(photo.relatif).parts[0]
+        epreuve = f"{nom}:{Path(photo.relatif).parts[0]}"
         if epreuve in self._epreuves_signalees:
             return
         self._epreuves_signalees.add(epreuve)
-        self.journal.ecrire(f"Ignoré : photo sans dossier cavalier dans « {epreuve} »")
+        self.journal.ecrire(
+            f"Ignoré : photo sans dossier cavalier dans « {epreuve} »"
+        )
 
     # --------------------------------------------------------------- 2. purge
 
-    def _purger_tampon(self, memoire: MemoireEvenement) -> None:
-        """Supprime du TAMPON les photos envoyées il y a longtemps.
+    def _purger_tampons(self, contextes: list[ContexteEvenement]) -> None:
+        """Supprime des TAMPONS les photos envoyées il y a longtemps.
 
         Jamais la source, jamais le FTP, et jamais la mémoire — c'est elle qui
         garantit qu'on ne renverra pas ces photos.
         """
         heures = self.config.purge_apres_heures
-        tampon = self._dossier_tampon
-        if heures <= 0 or tampon is None:
+        if heures <= 0:
             return
         if time.monotonic() < self._prochaine_purge:
             return
         self._prochaine_purge = time.monotonic() + INTERVALLE_PURGE_MINUTES * 60
 
         limite = datetime.now(timezone.utc) - timedelta(hours=heures)
-        supprimees = 0
-        with self._verrou:
-            entrees = list(memoire.entrees.values())
-        for entree in entrees:
-            if not entree.envoyee or not entree.envoyee_le:
-                continue
-            try:
-                envoyee_le = datetime.fromisoformat(entree.envoyee_le)
-            except ValueError:
-                continue
-            if envoyee_le.tzinfo is None:
-                envoyee_le = envoyee_le.replace(tzinfo=timezone.utc)
-            if envoyee_le >= limite:
-                continue
-            fichier = tampon / entree.rel
-            try:
-                if fichier.exists():
-                    fichier.unlink()
-                    supprimees += 1
-            except OSError:
-                continue
+        for ctx in contextes:
+            supprimees = 0
+            with self._verrou:
+                entrees = list(ctx.memoire.entrees.values())
+            for entree in entrees:
+                if not entree.envoyee or not entree.envoyee_le:
+                    continue
+                try:
+                    envoyee_le = datetime.fromisoformat(entree.envoyee_le)
+                except ValueError:
+                    continue
+                if envoyee_le.tzinfo is None:
+                    envoyee_le = envoyee_le.replace(tzinfo=timezone.utc)
+                if envoyee_le >= limite:
+                    continue
+                fichier = ctx.tampon / entree.rel
+                try:
+                    if fichier.exists():
+                        fichier.unlink()
+                        supprimees += 1
+                except OSError:
+                    continue
 
-        if supprimees:
-            self._nettoyer_dossiers_vides(tampon)
-            self.journal.ecrire(
-                f"Purge du tampon : {supprimees} photo(s) nettoyée(s) (mémoire conservée)"
-            )
+            if supprimees:
+                self._nettoyer_dossiers_vides(ctx.tampon)
+                self.journal.ecrire(
+                    f"Purge du tampon de {ctx.nom} : {supprimees} photo(s) "
+                    "nettoyée(s) (mémoire conservée)"
+                )
 
     @staticmethod
     def _nettoyer_dossiers_vides(racine: Path) -> None:
@@ -528,14 +650,31 @@ class Moteur:
 
     # ---------------------------------------------------------------- 3. envoi
 
-    def _envoyer_la_file(self, memoire: MemoireEvenement) -> None:
+    def _construire_file(
+        self, contextes: list[ContexteEvenement]
+    ) -> deque[tuple[str, str]]:
+        """File (nom_evt, source) en ALTERNANCE équitable entre événements :
+        une photo de l'un, une photo de l'autre — un gros arriéré n'affame
+        jamais les photos fraîches de l'événement d'à côté."""
+        with self._verrou:
+            listes = [
+                deque((ctx.nom, source) for source in ctx.memoire.en_attente())
+                for ctx in contextes
+            ]
+        file: deque[tuple[str, str]] = deque()
+        while any(listes):
+            for liste in listes:
+                if liste:
+                    file.append(liste.popleft())
+        return file
+
+    def _envoyer_la_file(self, contextes: list[ContexteEvenement]) -> None:
         mot_de_passe = self._mot_de_passe()
         if not mot_de_passe:
             self._noter("Mot de passe Lamapix non renseigné — ouvrez les réglages.")
             return
 
-        with self._verrou:
-            file = deque(memoire.en_attente())
+        file = self._construire_file(contextes)
         if not file:
             self._noter("À jour : toutes les photos détectées sont parties.")
             return
@@ -544,8 +683,9 @@ class Moteur:
         self.diagnostic.tracer("FENETRE", file=len(file))
         echeance = time.monotonic() + self.config.rescan_max
         verrou_file = threading.Lock()
+        par_nom = {ctx.nom: ctx for ctx in contextes}
 
-        def prochaine() -> str | None:
+        def prochaine() -> tuple[str, str] | None:
             """Sert la file. Liaison coupée : une seule sonde à la fois."""
             while not self._arret.is_set() and not self._en_pause:
                 if time.monotonic() > echeance:
@@ -567,18 +707,23 @@ class Moteur:
                     continue
                 with verrou_file:
                     maintenant = time.monotonic()
-                    reportees: list[str] = []
+                    reportees: list[tuple[str, str]] = []
                     choisie = None
                     while file:
-                        source = file.popleft()
+                        nom, source = file.popleft()
+                        ctx = par_nom.get(nom)
+                        if ctx is None:
+                            continue  # retiré de la surveillance entre-temps
                         with self._verrou:
-                            entree = memoire.entrees.get(source)
+                            entree = ctx.memoire.entrees.get(source)
                         if entree is None or entree.envoyee:
                             continue
-                        if self._en_cooldown(entree.rel, maintenant):
-                            reportees.append(source)
+                        if self._en_cooldown(
+                            self._afficher(nom, entree.rel), maintenant
+                        ):
+                            reportees.append((nom, source))
                             continue
-                        choisie = source
+                        choisie = (nom, source)
                         break
                     file.extend(reportees)  # réexaminées au prochain appel
                 if choisie is None:
@@ -588,16 +733,16 @@ class Moteur:
                 return choisie
             return None
 
-        def remettre(source: str) -> None:
+        def remettre(element: tuple[str, str]) -> None:
             """Photo victime du lien : elle repart EN TÊTE, la sonde la retente."""
             with verrou_file:
-                file.appendleft(source)
+                file.appendleft(element)
 
         nombre = max(1, min(3, self.config.connexions_paralleles))
         travailleurs = [
             threading.Thread(
                 target=self._travailleur,
-                args=(memoire, prochaine, remettre, mot_de_passe, echeance),
+                args=(par_nom, prochaine, remettre, mot_de_passe, echeance),
                 name=f"envoi-{index + 1}",
                 daemon=True,
             )
@@ -609,9 +754,10 @@ class Moteur:
             travailleur.join()
 
         with self._verrou:
-            memoire.sauver()
+            for ctx in contextes:
+                ctx.memoire.sauver()
             self._en_cours = ""
-            restantes = memoire.nombre_en_attente
+            restantes = sum(ctx.memoire.nombre_en_attente for ctx in contextes)
         self._noter(
             "À jour : toutes les photos détectées sont parties."
             if not restantes
@@ -620,9 +766,9 @@ class Moteur:
 
     def _travailleur(
         self,
-        memoire: MemoireEvenement,
-        prochaine: Callable[[], str | None],
-        remettre: Callable[[str], None],
+        par_nom: dict[str, ContexteEvenement],
+        prochaine: Callable[[], tuple[str, str] | None],
+        remettre: Callable[[tuple[str, str]], None],
         mot_de_passe: str,
         echeance: float,
     ) -> None:
@@ -632,58 +778,62 @@ class Moteur:
             while not self._arret.is_set() and not self._en_pause:
                 if time.monotonic() > echeance:
                     break  # on recoupe pour re-scanner : les nouveautés n'attendent pas
-                source = prochaine()
-                if source is None:
+                element = prochaine()
+                if element is None:
                     break
-                statut = self._envoyer_une(client, memoire, source)
+                nom, source = element
+                ctx = par_nom[nom]
+                statut = self._envoyer_une(client, ctx, source)
                 with self._verrou:
                     self._sonde_prise = False
                 if statut == "liaison":
-                    remettre(source)  # rien à reprocher à la photo : elle repassera
+                    remettre(element)  # rien à reprocher à la photo : elle repassera
                 elif self._identifiants_refuses:
                     break
         finally:
             client.fermer()
 
     def _client_ftps(self, mot_de_passe: str) -> ClientFtps:
+        # racine="" : les chemins distants portent l'événement en premier
+        # segment, ce qui permet à un même pool de connexions de servir tous
+        # les événements surveillés.
         return ClientFtps(
             hote=self.config.ftp_hote,
             port=self.config.ftp_port,
             utilisateur=self.config.ftp_utilisateur,
             mot_de_passe=mot_de_passe,
-            racine=self.config.evenement or "",
+            racine="",
             ignorer_certificat=self.config.ignorer_certificat,
             timeout=self.config.timeout_connexion,
             timeout_donnees=self.config.timeout_donnees,
         )
 
     def _envoyer_une(
-        self, client: ClientFtps, memoire: MemoireEvenement, source: str
+        self, client: ClientFtps, ctx: ContexteEvenement, source: str
     ) -> str:
         """Tente une photo. Retourne "ok", "echec" ou "liaison".
 
         "liaison" signifie : la photo n'a rien fait de mal, c'est le lien qui
         est tombé — l'appelant la remet en tête de file, sans aucune pénalité.
         """
+        memoire = ctx.memoire
         with self._verrou:
             entree = memoire.entrees.get(source)
         if entree is None or entree.envoyee:
             return "ok"
 
         rel = entree.rel
-        tampon = self._dossier_tampon
-        if tampon is None:
-            return "echec"
-        fichier = tampon / rel
+        aff = self._afficher(ctx.nom, rel)
+        fichier = ctx.tampon / rel
         if not fichier.exists():
             # Tampon disparu : on le reconstituera au prochain scan.
             return "ok"
 
-        parent = str(PurePosixPath(rel).parent)
+        parent = str(PurePosixPath(aff).parent)
         parent = "" if parent == "." else parent
 
         with self._verrou:
-            self._en_cours = rel
+            self._en_cours = aff
 
         try:
             octets = fichier.stat().st_size
@@ -699,15 +849,15 @@ class Moteur:
                     # session keep-alive peut être dans un état bancal.
                     client.fermer(poli=False)
                     client.invalider_cache(parent)
-                client.envoyer(fichier, rel)
+                client.envoyer(fichier, aff)
                 self.diagnostic.tracer(
                     "ENVOI_OK",
                     duree_ms=int((time.monotonic() - debut_essai) * 1000),
                     octets=octets,
                     essai=essai,
-                    rel=rel,
+                    rel=aff,
                 )
-                self._noter_succes(memoire, source, rel)
+                self._noter_succes(memoire, source, aff, parent)
                 return "ok"
             except ErreurIdentifiants as exc:
                 derniere = str(exc)
@@ -720,13 +870,15 @@ class Moteur:
                 # refusera tous les envois suivants, y compris aux prochains scans.
                 derniere = str(exc)
                 self.journal.ecrire(
-                    f"Envoi interrompu détecté sur {rel} — nettoyage du fragment "
+                    f"Envoi interrompu détecté sur {aff} — nettoyage du fragment "
                     f"« {exc.fragment} »"
                 )
                 try:
-                    client.supprimer_fragment(exc.fragment)
+                    # `sous` réancre le garde-fou : seul un fragment DE CET
+                    # événement est supprimable depuis ce contexte.
+                    client.supprimer_fragment(exc.fragment, sous=ctx.nom)
                 except ErreurFtp as echec:
-                    self.journal.erreur(f"fragment non supprimable — {rel} : {echec}")
+                    self.journal.erreur(f"fragment non supprimable — {aff} : {echec}")
                 if essai < self.config.essais_max and not self._arret.is_set():
                     time.sleep(self._attente_entre_essais(essai))
             except ErreurLiaison as exc:
@@ -736,9 +888,9 @@ class Moteur:
                 self.diagnostic.tracer(
                     "ENVOI_LIEN",
                     duree_ms=int((time.monotonic() - debut_essai) * 1000),
-                    rel=rel,
+                    rel=aff,
                 )
-                if self._noter_liaison(rel, str(exc)):
+                if self._noter_liaison(aff, str(exc)):
                     derniere = str(exc)
                     break        # photo pathologique : échec normal
                 return "liaison"
@@ -748,47 +900,50 @@ class Moteur:
                     "ENVOI_KO",
                     duree_ms=int((time.monotonic() - debut_essai) * 1000),
                     essai=essai,
-                    rel=rel,
+                    rel=aff,
                 )
-                self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {rel} : {exc}")
+                self.journal.ecrire(f"Essai {essai}/{self.config.essais_max} — {aff} : {exc}")
                 if essai < self.config.essais_max and not self._arret.is_set():
                     time.sleep(self._attente_entre_essais(essai))
 
-        self._noter_echec(rel, parent, derniere)
+        self._noter_echec(aff, parent, derniere)
         return "echec"
 
     # ------------------------------------------------------------- cooldowns
 
-    def _en_cooldown(self, rel: str, maintenant: float) -> bool:
-        parent = str(PurePosixPath(rel).parent)
+    def _en_cooldown(self, aff: str, maintenant: float) -> bool:
+        parent = str(PurePosixPath(aff).parent)
         parent = "" if parent == "." else parent
         with self._verrou:
             if self._pause_dossier.get(parent, 0.0) > maintenant:
                 return True
-            return self._pause_fichier.get(rel, 0.0) > maintenant
+            return self._pause_fichier.get(aff, 0.0) > maintenant
 
-    def _noter_succes(self, memoire: MemoireEvenement, source: str, rel: str) -> None:
+    def _noter_succes(
+        self, memoire: MemoireEvenement, source: str, aff: str, parent: str
+    ) -> None:
         maintenant = datetime.now()
-        parent = str(PurePosixPath(rel).parent)
-        parent = "" if parent == "." else parent
         with self._verrou:
             memoire.marquer_envoyee(source)
             memoire.sauver_si_necessaire()
-            self._erreurs.pop(rel, None)
-            self._pause_fichier.pop(rel, None)
+            self._erreurs.pop(aff, None)
+            self._pause_fichier.pop(aff, None)
             # Un succès efface l'historique : la liaison est revenue.
-            self._echecs_fichier.pop(rel, None)
+            self._echecs_fichier.pop(aff, None)
             self._echecs_dossier[parent] = 0
             self._echecs_dossier_suite.pop(parent, None)
             # La liaison répond : disjoncteur refermé, ardoise effacée.
             self._pannes_liaison = 0
             self._prochaine_sonde = 0.0
-            self._liaisons_fichier.pop(rel, None)
+            self._liaisons_fichier.pop(aff, None)
             self._dernier_envoi = maintenant
             self._envois_recents.append(time.monotonic())
             self._elaguer_debit()
-            self._note = f"Envoi en cours — {memoire.nombre_en_attente} photo(s) en attente…"
-        self.journal.succes(rel)
+            restantes = sum(
+                ctx.memoire.nombre_en_attente for ctx in self._contextes.values()
+            )
+            self._note = f"Envoi en cours — {restantes} photo(s) en attente…"
+        self.journal.succes(aff)
 
     def _attente_entre_essais(self, essai: int) -> float:
         """Délai avant la tentative suivante, croissant."""
@@ -806,7 +961,7 @@ class Moteur:
         base = DELAIS_REPRISE[min(echecs, len(DELAIS_REPRISE)) - 1]
         return float(min(base, self.config.pause_apres_echec))
 
-    def _noter_liaison(self, rel: str, message: str) -> bool:
+    def _noter_liaison(self, aff: str, message: str) -> bool:
         """Comptabilise une panne de LIEN. True si cette photo doit être
         traitée en échec normal (elle seule fait tomber la liaison).
 
@@ -815,12 +970,12 @@ class Moteur:
         """
         with self._verrou:
             self._pannes_liaison += 1
-            self._liaisons_fichier[rel] = self._liaisons_fichier.get(rel, 0) + 1
-            pathologique = self._liaisons_fichier[rel] >= MAX_LIAISONS_PAR_PHOTO
+            self._liaisons_fichier[aff] = self._liaisons_fichier.get(aff, 0) + 1
+            pathologique = self._liaisons_fichier[aff] >= MAX_LIAISONS_PAR_PHOTO
             rang = max(0, self._pannes_liaison - SEUIL_LIAISON_COUPEE)
             delai = DELAIS_SONDE[min(rang, len(DELAIS_SONDE) - 1)]
             self._prochaine_sonde = time.monotonic() + delai
-            self._derniere_erreur = f"{rel} : {message}"
+            self._derniere_erreur = f"{aff} : {message}"
             self._en_cours = ""
             if self._pannes_liaison >= SEUIL_LIAISON_COUPEE:
                 self._note = (
@@ -828,22 +983,22 @@ class Moteur:
                     "(reprise automatique dès que ça répond)…"
                 )
             if pathologique:
-                self._liaisons_fichier.pop(rel, None)
-        self.journal.ecrire(f"Liaison interrompue — {rel} : {message}")
+                self._liaisons_fichier.pop(aff, None)
+        self.journal.ecrire(f"Liaison interrompue — {aff} : {message}")
         self.diagnostic.tracer(
             "LIAISON", pannes=self._pannes_liaison, sonde_dans_s=int(delai)
         )
         return pathologique
 
-    def _noter_echec(self, rel: str, parent: str, message: str) -> None:
+    def _noter_echec(self, aff: str, parent: str, message: str) -> None:
         """Un fichier en erreur ne doit JAMAIS bloquer les autres : on l'écarte
         un moment et la file continue."""
         with self._verrou:
-            self._erreurs[rel] = message
-            self._derniere_erreur = f"{rel} : {message}"
-            self._echecs_fichier[rel] = self._echecs_fichier.get(rel, 0) + 1
-            attente = self._mise_en_attente(self._echecs_fichier[rel])
-            self._pause_fichier[rel] = time.monotonic() + attente
+            self._erreurs[aff] = message
+            self._derniere_erreur = f"{aff} : {message}"
+            self._echecs_fichier[aff] = self._echecs_fichier.get(aff, 0) + 1
+            attente = self._mise_en_attente(self._echecs_fichier[aff])
+            self._pause_fichier[aff] = time.monotonic() + attente
 
             self._echecs_dossier[parent] = self._echecs_dossier.get(parent, 0) + 1
             trop = self._echecs_dossier[parent] >= self.config.echecs_avant_pause_dossier
@@ -857,7 +1012,7 @@ class Moteur:
                 )
                 self._pause_dossier[parent] = time.monotonic() + attente_dossier
                 self._echecs_dossier[parent] = 0
-        self.journal.erreur(f"{rel} : {message} (nouvel essai dans {int(attente)} s)")
+        self.journal.erreur(f"{aff} : {message} (nouvel essai dans {int(attente)} s)")
         if trop:
             self.journal.ecrire(
                 f"Dossier « {parent or '(racine)'} » mis en attente "
@@ -883,41 +1038,33 @@ class Moteur:
             return
 
         with self._verrou:
-            if self._memoire is not None:
-                self._memoire.sauver()
+            if nom in self._contextes:
+                return  # déjà surveillé
 
-            self.config.evenement = nom
-            self.config.dossier_source = source
             tampon = paths.racine_tampon() / nom
             tampon.mkdir(parents=True, exist_ok=True)
-
-            self._dossier_source = chemin
-            self._dossier_tampon = tampon
-            self._memoire = MemoireEvenement.charger(tampon / "_memoire.json")
-            self._erreurs.clear()
-            self._pause_fichier.clear()
-            self._pause_dossier.clear()
-            self._echecs_dossier.clear()
-            self._echecs_fichier.clear()
-            self._echecs_dossier_suite.clear()
-            self._liaisons_fichier.clear()
-            self._pannes_liaison = 0
-            self._prochaine_sonde = 0.0
-            self._sonde_prise = False
-            self._epreuves_signalees.clear()
-            self._dernier_scan = []
-            self._detectees = 0
+            memoire = MemoireEvenement.charger(tampon / "_memoire.json")
+            self._contextes[nom] = ContexteEvenement(
+                nom=nom, source=chemin, tampon=tampon, memoire=memoire
+            )
+            self._detectees[nom] = 0
+            self._dernier_scan[nom] = []
             self._derniere_erreur = ""
-            connues = len(self._memoire.entrees)
+            connues = len(memoire.entrees)
 
+        # Les événements changent en cours de route : un scan complet s'impose.
         self._dernier_scan_a = float("-inf")
-        self.journal.rediriger(paths.racine_journaux() / f"{nom}.txt")
-        self.diagnostic.rediriger(paths.racine_journaux() / f"diagnostic_{nom}.txt")
+        # Journal et diagnostic communs à toute la surveillance : les lignes
+        # portent l'événement en tête de chemin, un seul fichier à consulter.
+        self.journal.rediriger(paths.racine_journaux() / "journal.txt")
+        self.diagnostic.rediriger(paths.racine_journaux() / "diagnostic.txt")
         self.journal.ecrire(
             f"Événement surveillé : {nom} | dossier : {source} "
             f"| mémoire : {connues} photo(s) connue(s)"
         )
         if memoriser:
+            if source not in self.config.dossiers_surveilles:
+                self.config.dossiers_surveilles.append(source)
             self.config.sauver()
 
     def _rafraichir_evenements(self) -> None:

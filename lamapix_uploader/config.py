@@ -21,8 +21,9 @@ class Config:
 
     # --- Source
     base_redim: str = r"C:\Kadra\redim"
-    evenement: str | None = None          # nom de l'événement surveillé
-    dossier_source: str | None = None     # chemin complet (local ou UNC)
+    # Chemins complets des dossiers événements surveillés (0, 1 ou plusieurs).
+    # Tout ce qui n'y figure pas — même présent dans base_redim — est ignoré.
+    dossiers_surveilles: list[str] = field(default_factory=list)
 
     # --- Destination
     # Le dépôt est public : ni identifiant ni nom de serveur interne en dur ici.
@@ -76,6 +77,11 @@ class Config:
         if not isinstance(brut, dict):
             return cls()
 
+        # Migration v2 : l'unique `dossier_source` devient le premier élément
+        # de la liste de surveillance.
+        if brut.get("dossier_source") and not brut.get("dossiers_surveilles"):
+            brut["dossiers_surveilles"] = [brut["dossier_source"]]
+
         connus = {f for f in cls().__dict__}
         retenus = {k: v for k, v in brut.items() if k in connus}
         try:
@@ -107,15 +113,6 @@ class Config:
     @property
     def extensions_tuple(self) -> tuple[str, ...]:
         return tuple(e.lower() for e in self.extensions)
-
-    def dossier_tampon_evenement(self) -> Path | None:
-        if not self.evenement:
-            return None
-        return paths.racine_tampon() / self.evenement
-
-    def fichier_memoire(self) -> Path | None:
-        tampon = self.dossier_tampon_evenement()
-        return None if tampon is None else tampon / "_memoire.json"
 
     def resoudre_source(self, saisie: str) -> tuple[str, str]:
         """(nom_evenement, dossier_source) depuis un nom de dossier OU un chemin complet.

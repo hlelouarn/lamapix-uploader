@@ -174,11 +174,12 @@ class ClientFauxLamapix:
             self.serveur.fichiers[absolu] = fichier_local.read_bytes()
             self.serveur.fragments.discard(fragment)   # renommé par le serveur
 
-    def supprimer_fragment(self, chemin: str) -> None:
+    def supprimer_fragment(self, chemin: str, sous: str | None = None) -> None:
         """Le vrai client refuse tout ce qui n'est pas un fragment : on rejoue
         ce garde-fou ici, pour qu'un test le vérifie réellement."""
+        base = sous or self.racine
         nom = PurePosixPath(chemin).name
-        if not chemin.startswith(f"{self.racine}/") or not nom.startswith("."):
+        if not base or not chemin.startswith(f"{base}/") or not nom.startswith("."):
             raise ErreurFtp(f"refus de supprimer « {chemin} »")
         self._connecter()
         with self.serveur.verrou:
@@ -222,9 +223,7 @@ def fabrique_moteur(racine_isolee, serveur):
             config=config,
             journal=Journal(),
             fournisseur_mot_de_passe=lambda: "secret",
-            fabrique_client=lambda _mdp: ClientFauxLamapix(
-                serveur, config.evenement or ""
-            ),
+            fabrique_client=lambda _mdp: ClientFauxLamapix(serveur, ""),
         )
         moteur.choisir_evenement(str(dossier_source))
         return moteur

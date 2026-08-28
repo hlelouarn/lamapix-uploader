@@ -265,6 +265,10 @@ class ClientFtps:
         raise ErreurFtp(str(exc)) from exc
 
     def _chemin_absolu(self, rel: str) -> str:
+        # racine="" (mode multi-événements) : `rel` porte déjà l'événement en
+        # premier segment, le chemin absolu est simplement /rel.
+        if not self.racine:
+            return "/" + rel if rel else "/"
         return "/" + str(PurePosixPath(self.racine, rel)) if rel else "/" + self.racine
 
     def assurer_dossier(self, rel_dossier: str) -> None:
@@ -276,7 +280,9 @@ class ClientFtps:
         self.connecter()
         assert self._ftp is not None
 
-        niveaux: list[str] = [""]
+        # Avec racine="", le niveau « racine du compte » existe toujours : on ne
+        # tente pas de MKD "/".
+        niveaux: list[str] = [] if not self.racine else [""]
         if rel_dossier:
             cumul = PurePosixPath()
             for segment in PurePosixPath(rel_dossier).parts:
@@ -350,7 +356,10 @@ class ClientFtps:
             return None
 
         cible = PurePosixPath(self._chemin_absolu(rel_distant))
-        prefixe = f"/{self.racine}/"
+        # Le fragment doit vivre sous la racine de SON événement : premier
+        # segment de rel quand racine="", la racine du client sinon.
+        base = self.racine or PurePosixPath(rel_distant).parts[0]
+        prefixe = f"/{base}/"
 
         for candidat in _MOTIF_CHEMIN_CITE.findall(message):
             candidat = candidat.strip()
@@ -365,15 +374,19 @@ class ClientFtps:
         # défaut de ProFTPD (`HiddenStores` = `.in.<nom>.`).
         return f"{cible.parent}/.in.{cible.name}."
 
-    def supprimer_fragment(self, chemin: str) -> None:
+    def supprimer_fragment(self, chemin: str, sous: str | None = None) -> None:
         """Efface un fragment d'envoi interrompu. LA SEULE suppression distante.
 
         Ce n'est jamais une photo : c'est le résidu d'un de nos propres envois
         coupés en route, que le serveur refuse ensuite d'écraser. Le garde-fou
-        est revérifié ici, indépendamment de l'appelant.
+        est revérifié ici, indépendamment de l'appelant. `sous` réancre la
+        vérification sur l'événement en cours quand la racine du client est
+        vide (mode multi-événements) : sans lui, le préfixe deviendrait "//" et
+        n'exclurait plus rien.
         """
+        base = sous or self.racine
         nom = PurePosixPath(chemin).name
-        if not chemin.startswith(f"/{self.racine}/") or not nom.startswith("."):
+        if not base or not chemin.startswith(f"/{base}/") or not nom.startswith("."):
             raise ErreurFtp(
                 f"refus de supprimer « {chemin} » : ce n'est pas un fragment d'envoi."
             )

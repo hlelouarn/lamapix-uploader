@@ -26,10 +26,13 @@ from ..engine import Moteur
 class DialogueInitialisation(QDialog):
     """Retourne, via `frontiere()`, le timestamp choisi (ou None = tout)."""
 
-    def __init__(self, moteur: Moteur, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, moteur: Moteur, nom: str, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.moteur = moteur
-        self.setWindowTitle("Initialiser la mémoire")
+        self.nom = nom
+        self.setWindowTitle(f"Initialiser la mémoire — {nom}")
         self.setMinimumWidth(560)
 
         disposition = QVBoxLayout(self)
@@ -103,7 +106,7 @@ class DialogueInitialisation(QDialog):
         return float(self.champ_date.dateTime().toSecsSinceEpoch())
 
     def _rafraichir(self) -> None:
-        concernees, total = self.moteur.apercu_initialisation(self.frontiere())
+        concernees, total = self.moteur.apercu_initialisation(self.frontiere(), self.nom)
         restantes = total - concernees
         self.apercu.setText(
             f"{concernees} photo(s) sur {total} seraient déclarées déjà envoyées."

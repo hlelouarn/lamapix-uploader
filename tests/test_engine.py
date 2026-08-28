@@ -569,7 +569,8 @@ class TestLiaisonInstable:
     ):
         """Avant : 4 minutes d'arrêt complet pour une microcoupure."""
         distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
-        interne = "DUPONT MARIE_ECLAIR/a.jpg"   # le moteur indexe sans l'événement
+        # depuis la v2 le moteur indexe par chemin complet, événement compris
+        interne = distant
         serveur.echecs_pour[distant] = 99
         poser_photo(source, PHOTO_A)
 
@@ -585,7 +586,7 @@ class TestLiaisonInstable:
         """La liaison est revenue : la photo suivante ne doit pas hériter des
         pénalités accumulées pendant la coupure."""
         distant = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"
-        interne = "DUPONT MARIE_ECLAIR/a.jpg"
+        interne = distant   # clés indexées par chemin complet depuis la v2
         serveur.echecs_pour[distant] = 99
         poser_photo(source, PHOTO_A)
         moteur = fabrique_moteur(source, essais_max=1)
@@ -775,12 +776,209 @@ class TestRythmeDesTours:
         moteur = fabrique_moteur(source)
         moteur._un_tour()
 
-        fichier = (
-            racine_isolee / "donnees" / "journaux"
-            / "diagnostic_2026-08-02GRANDPRIX.txt"
-        )
+        # Depuis la v2 le diagnostic est commun à toute la surveillance : un
+        # seul fichier, les lignes portent l'événement en tête de chemin.
+        fichier = racine_isolee / "donnees" / "journaux" / "diagnostic.txt"
         contenu = fichier.read_text(encoding="utf-8")
         assert "SCAN " in contenu and "duree_ms=" in contenu
         assert "ENVOI_OK" in contenu and "octets=" in contenu
         assert "LIAISON" in contenu
         assert "TOUR" in contenu
+
+
+class TestMultiEvenements:
+    """v2.0 : une LISTE d'événements surveillés. Un seul pool de connexions,
+    un seul disjoncteur, alternance équitable — et tout dossier hors de la
+    liste n'existe pas pour l'outil."""
+
+    @pytest.fixture
+    def deux_sources(self, tmp_path):
+        redim = tmp_path / "redim"
+        a = redim / "2026-09-05CONCOURS_A"
+        b = redim / "2026-09-06CONCOURS_B"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        return a, b
+
+    def test_les_deux_evenements_partent_chacun_dans_leur_dossier_distant(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        poser_photo(b, PHOTO_C)
+
+        moteur = fabrique_moteur(a)
+        moteur.ajouter_evenement(str(b))
+        moteur._un_tour()
+
+        assert deposes(serveur) == {
+            "2026-09-05CONCOURS_A/DUPONT MARIE_ECLAIR/a.jpg",
+            "2026-09-06CONCOURS_B/MARTIN PAUL_ORAGE/c.jpg",
+        }
+
+    def test_un_dossier_non_surveille_est_ignore(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        """Le second besoin exprimé : des dossiers restent dans redim sans être
+        surveillés — ils ne doivent JAMAIS partir."""
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        poser_photo(b, PHOTO_C)          # b existe dans redim mais pas surveillé
+
+        moteur = fabrique_moteur(a)      # seul a est surveillé
+        moteur._un_tour()
+
+        assert deposes(serveur) == {"2026-09-05CONCOURS_A/DUPONT MARIE_ECLAIR/a.jpg"}
+
+    def test_lalternance_est_equitable(self, deux_sources, serveur, fabrique_moteur):
+        """Un gros arriéré sur A ne doit pas faire attendre les photos de B :
+        la file alterne une photo de chaque."""
+        a, b = deux_sources
+        for index in range(4):
+            poser_photo(a, f"CSO_01_Amateur/1001_DUPONT MARIE_ECLAIR/p{index}.jpg")
+            poser_photo(b, f"CSO_04_Pro/2317_MARTIN PAUL_ORAGE/q{index}.jpg")
+
+        moteur = fabrique_moteur(a, connexions_paralleles=1)
+        moteur.ajouter_evenement(str(b))
+        moteur._un_tour()
+
+        evenements = [s.split("/")[0] for s in serveur.stors]
+        # Séquentiel + alternance : deux envois consécutifs ne viennent jamais
+        # du même événement.
+        assert all(
+            evenements[i] != evenements[i + 1] for i in range(len(evenements) - 1)
+        )
+
+    def test_retirer_arrete_les_envois_mais_garde_la_memoire(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        poser_photo(b, PHOTO_C)
+
+        moteur = fabrique_moteur(a)
+        moteur.ajouter_evenement(str(b))
+        moteur._un_tour()
+        assert len(deposes(serveur)) == 2
+
+        moteur.retirer_evenement("2026-09-06CONCOURS_B")
+        poser_photo(b, "CSO_04_Pro/2317_MARTIN PAUL_ORAGE/d.jpg")
+        serveur.stors.clear()
+        moteur._dernier_scan_a = float("-inf")
+        moteur._un_tour()
+        assert serveur.stors == []       # b n'est plus surveillé
+
+        # Re-surveiller reprend où on en était : d.jpg part, c.jpg ne REpart pas.
+        moteur.ajouter_evenement(str(b))
+        moteur._dernier_scan_a = float("-inf")
+        moteur._un_tour()
+        assert serveur.stors == ["2026-09-06CONCOURS_B/MARTIN PAUL_ORAGE/d.jpg"]
+
+    def test_initialiser_ne_touche_que_levenement_designe(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        poser_photo(b, PHOTO_C)
+
+        moteur = fabrique_moteur(a)
+        moteur.ajouter_evenement(str(b))
+        scanner_sans_envoyer(moteur)
+
+        assert moteur.initialiser_memoire(nom="2026-09-05CONCOURS_A") == 1
+        moteur._un_tour()
+
+        # A est déclaré envoyé (rien ne part), B part normalement.
+        assert deposes(serveur) == {"2026-09-06CONCOURS_B/MARTIN PAUL_ORAGE/c.jpg"}
+
+    def test_initialiser_sans_nom_exige_un_evenement_unique(
+        self, deux_sources, fabrique_moteur
+    ):
+        """À deux surveillés, un Initialiser sans cible serait ambigu : refus."""
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        moteur = fabrique_moteur(a)
+        moteur.ajouter_evenement(str(b))
+        scanner_sans_envoyer(moteur)
+
+        assert moteur.initialiser_memoire() == 0    # ambigu -> ne fait rien
+
+    def test_un_fragment_dun_autre_evenement_est_refuse(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        """Le garde-fou réancré : depuis le contexte A, seuls les fragments DE A
+        sont supprimables."""
+        a, _ = deux_sources
+        moteur = fabrique_moteur(a)
+        client = moteur._fabrique_client("secret")
+        serveur.fragments.add("2026-09-06CONCOURS_B/NOM/.in.x.jpg.")
+
+        import pytest as _pytest
+        from lamapix_uploader.ftp import ErreurFtp as _ErreurFtp
+
+        with _pytest.raises(_ErreurFtp, match="refus"):
+            client.supprimer_fragment(
+                "2026-09-06CONCOURS_B/NOM/.in.x.jpg.", sous="2026-09-05CONCOURS_A"
+            )
+
+    def test_le_disjoncteur_est_commun_aux_deux_evenements(
+        self, deux_sources, serveur, fabrique_moteur
+    ):
+        """La panne du LIEN vaut pour tout le monde : une panne globale se
+        résout par la sonde et TOUT repart, les deux événements confondus."""
+        a, b = deux_sources
+        for index in range(3):
+            poser_photo(a, f"CSO_01_Amateur/1001_DUPONT MARIE_ECLAIR/p{index}.jpg")
+            poser_photo(b, f"CSO_04_Pro/2317_MARTIN PAUL_ORAGE/q{index}.jpg")
+        serveur.panne_globale = 4
+
+        moteur = fabrique_moteur(a, connexions_paralleles=2)
+        moteur.ajouter_evenement(str(b))
+        moteur._un_tour()
+
+        assert len(deposes(serveur)) == 6
+        assert moteur._pannes_liaison == 0
+        assert moteur.etat().erreurs == 0
+
+    def test_letat_expose_le_detail_par_evenement(
+        self, deux_sources, fabrique_moteur
+    ):
+        a, b = deux_sources
+        poser_photo(a, PHOTO_A)
+        poser_photo(a, PHOTO_B)
+        poser_photo(b, PHOTO_C)
+
+        moteur = fabrique_moteur(a)
+        moteur.ajouter_evenement(str(b))
+        moteur._un_tour()
+
+        etat = moteur.etat()
+        assert etat.surveilles == ["2026-09-05CONCOURS_A", "2026-09-06CONCOURS_B"]
+        assert dict((n, (d, e, r)) for n, d, e, r in etat.par_evenement) == {
+            "2026-09-05CONCOURS_A": (2, 2, 0),
+            "2026-09-06CONCOURS_B": (1, 1, 0),
+        }
+        assert (etat.detectees, etat.envoyees) == (3, 3)
+        assert etat.evenement is None    # plus d'événement « unique »
+
+    def test_la_config_migre_lancien_dossier_unique(self, tmp_path):
+        """Les configs déployées (v1.x) portent un `dossier_source` unique : il
+        devient le premier élément de la liste de surveillance."""
+        import json
+
+        from lamapix_uploader.config import Config
+
+        ancien = r"C:\Kadra\redim\VIEUX"
+        fichier = tmp_path / "config.json"
+        fichier.write_text(
+            json.dumps(
+                {
+                    "ftp_utilisateur": "x",
+                    "evenement": "VIEUX",
+                    "dossier_source": ancien,
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = Config.charger(fichier)
+        assert config.dossiers_surveilles == [ancien]

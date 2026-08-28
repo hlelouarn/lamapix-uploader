@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QInputDialog,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -75,6 +76,7 @@ class FenetrePrincipale(QMainWindow):
         self._icone = icone
         self._quitter_pour_de_bon = False
         self._evenements_affiches: list[str] = []
+        self._surveilles_affiches: list[str] = []
         self._chercheur: ChercheurMiseAJour | None = None
         self._telechargeur: TelechargeurMiseAJour | None = None
         self._progres: QProgressDialog | None = None
@@ -194,6 +196,27 @@ class FenetrePrincipale(QMainWindow):
         ligne.addWidget(bouton_surveiller)
         bloc.addLayout(ligne)
 
+        # Les événements surveillés (0, 1 ou plusieurs). Tout dossier absent de
+        # cette liste est ignoré, même s'il traîne dans redim.
+        ligne_surveilles = QHBoxLayout()
+        self.liste_surveilles = QListWidget()
+        self.liste_surveilles.setFixedHeight(58)
+        self.liste_surveilles.setToolTip(
+            "Événements actuellement surveillés. Sélectionnez-en un puis "
+            "« Retirer » pour arrêter de l'envoyer (sa mémoire est conservée)."
+        )
+        bouton_retirer = QPushButton("Retirer")
+        bouton_retirer.setToolTip(
+            "Arrête la surveillance de l'événement sélectionné. Rien n'est "
+            "effacé : le re-surveiller reprendra où il en était."
+        )
+        bouton_retirer.clicked.connect(self._retirer)
+        ligne_surveilles.addWidget(self.liste_surveilles, 1)
+        ligne_surveilles.addWidget(
+            bouton_retirer, 0, Qt.AlignmentFlag.AlignTop
+        )
+        bloc.addLayout(ligne_surveilles)
+
         self.etiquette_source = QLabel()
         self.etiquette_source.setObjectName("source")
         bloc.addWidget(self.etiquette_source)
@@ -279,7 +302,7 @@ class FenetrePrincipale(QMainWindow):
     # ---------------------------------------------------------------- actions
 
     def _parcourir(self) -> None:
-        depart = self.config.dossier_source or self.config.base_redim
+        depart = self.config.base_redim
         dossier = QFileDialog.getExistingDirectory(
             self, "Choisir le dossier de l'événement à surveiller", depart
         )
@@ -294,27 +317,59 @@ class FenetrePrincipale(QMainWindow):
                 self, "Événement", "Choisissez un événement ou collez un chemin."
             )
             return
-        if saisie == self.config.evenement:
-            return
+        surveilles = self.moteur.etat().surveilles
+        if Path(saisie).name in surveilles or saisie in surveilles:
+            return  # déjà surveillé
         reponse = QMessageBox.question(
             self,
             "Surveiller ce dossier ?",
-            f"Surveiller :\n{saisie}\n\nLes nouvelles photos partiront sur Lamapix.",
+            f"Ajouter à la surveillance :\n{saisie}\n\n"
+            "Ses nouvelles photos partiront sur Lamapix, en plus des événements "
+            "déjà surveillés.",
         )
         if reponse == QMessageBox.StandardButton.Yes:
-            self.moteur.choisir_evenement(saisie)
+            self.moteur.ajouter_evenement(saisie)
+
+    def _retirer(self) -> None:
+        element = self.liste_surveilles.currentItem()
+        if element is None:
+            return
+        nom = element.data(Qt.ItemDataRole.UserRole)
+        reponse = QMessageBox.question(
+            self,
+            "Retirer de la surveillance ?",
+            f"Ne plus surveiller « {nom} » ?\n\n"
+            "Rien n'est effacé : sa mémoire et son tampon restent sur ce PC, "
+            "le re-surveiller reprendra exactement où il en était.",
+        )
+        if reponse == QMessageBox.StandardButton.Yes:
+            self.moteur.retirer_evenement(nom)
+
+    def _choisir_cible(self, titre: str) -> str | None:
+        """L'événement visé par une action de mémoire. Sans ambiguïté quand il
+        n'y en a qu'un ; sinon on demande, jamais on ne devine."""
+        surveilles = self.moteur.etat().surveilles
+        if not surveilles:
+            return None
+        if len(surveilles) == 1:
+            return surveilles[0]
+        nom, valide = QInputDialog.getItem(
+            self, titre, "Quel événement ?", surveilles, 0, False
+        )
+        return nom if valide else None
 
     def _basculer_pause(self) -> None:
         self.moteur.basculer_pause()
         self._rafraichir()
 
     def _initialiser(self) -> None:
-        if not self.config.evenement:
+        cible = self._choisir_cible("Initialiser la mémoire")
+        if cible is None:
             return
-        dialogue = DialogueInitialisation(self.moteur, self)
+        dialogue = DialogueInitialisation(self.moteur, cible, self)
         if not dialogue.exec():
             return
-        nombre = self.moteur.initialiser_memoire(dialogue.frontiere())
+        nombre = self.moteur.initialiser_memoire(dialogue.frontiere(), nom=cible)
         QMessageBox.information(
             self,
             "Initialisation",
@@ -337,21 +392,25 @@ class FenetrePrincipale(QMainWindow):
             "Les photos réellement envoyées par l'outil ne sont pas concernées.",
         )
         if reponse == QMessageBox.StandardButton.Yes:
-            self.moteur.annuler_initialisation()
+            cible = self._choisir_cible("Annuler l'initialisation")
+            if cible is not None:
+                self.moteur.annuler_initialisation(nom=cible)
 
     def _reinitialiser(self) -> None:
-        if not self.config.evenement:
+        cible = self._choisir_cible("Réinitialiser (tout renvoyer)")
+        if cible is None:
             return
         reponse = QMessageBox.warning(
             self,
             "Tout renvoyer ?",
-            f"Effacer la mémoire de « {self.config.evenement} » ?\n\n"
-            "TOUTES les photos présentes seront (re)envoyées sur Lamapix.",
+            f"Effacer la mémoire de « {cible} » ?\n\n"
+            "TOUTES les photos présentes de cet événement seront (re)envoyées "
+            "sur Lamapix.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reponse == QMessageBox.StandardButton.Yes:
-            self.moteur.reinitialiser_memoire()
+            self.moteur.reinitialiser_memoire(nom=cible)
 
     def _ouvrir_reglages(self) -> None:
         dialogue = DialogueReglages(self.config, self)
@@ -508,12 +567,38 @@ class FenetrePrincipale(QMainWindow):
         self._maj_zone_notification(etat)
 
     def _maj_bandeau(self, etat: Etat) -> None:
-        self.etiquette_evenement.setText(
-            f"Événement : {etat.evenement}" if etat.evenement else "aucun événement choisi"
+        if not etat.surveilles:
+            titre = "aucun événement surveillé"
+        elif len(etat.surveilles) == 1:
+            titre = f"Événement : {etat.surveilles[0]}"
+        else:
+            titre = f"{len(etat.surveilles)} événements surveillés"
+        self.etiquette_evenement.setText(titre)
+
+        # Détail par événement : « NOM : envoyées/total » — c'est la ligne qu'on
+        # regarde pour savoir si les DEUX concours avancent.
+        details = " · ".join(
+            f"{nom} : {envoyees}/{envoyees + en_attente}"
+            for nom, _, envoyees, en_attente in etat.par_evenement
         )
-        self.etiquette_source.setText(
-            f"Dossier surveillé : {etat.source}" if etat.source else ""
-        )
+        self.etiquette_source.setText(details)
+
+        # La liste des surveillés, sans casser la sélection en cours.
+        libelles = [
+            f"{nom} — {envoyees}/{envoyees + en_attente} envoyées"
+            for nom, _, envoyees, en_attente in etat.par_evenement
+        ]
+        if libelles != self._surveilles_affiches:
+            self._surveilles_affiches = list(libelles)
+            selection = self.liste_surveilles.currentRow()
+            self.liste_surveilles.clear()
+            for (nom, *_), libelle in zip(etat.par_evenement, libelles):
+                self.liste_surveilles.addItem(libelle)
+                element = self.liste_surveilles.item(self.liste_surveilles.count() - 1)
+                element.setData(Qt.ItemDataRole.UserRole, nom)
+            if 0 <= selection < self.liste_surveilles.count():
+                self.liste_surveilles.setCurrentRow(selection)
+
         self.badge_pause.setVisible(etat.en_pause)
         self.bouton_pause.setText("Reprendre les envois" if etat.en_pause else "Pause")
 
@@ -635,4 +720,4 @@ class FenetrePrincipale(QMainWindow):
 
 
 def dossier_par_defaut(config: Config) -> Path:
-    return Path(config.dossier_source or config.base_redim)
+    return Path(config.base_redim)

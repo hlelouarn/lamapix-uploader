@@ -54,6 +54,24 @@ LamapixUploader\
 > chemin exact du dossier surveillé. Deux PC qui envoient le même événement ne se
 > connaissent pas et enverront chacun leur lot.
 
+## Surveiller plusieurs événements (v2.0)
+
+L'outil surveille une **liste** d'événements — 0, 1 ou plusieurs — et tout
+dossier hors de la liste **n'existe pas pour lui**, même s'il traîne dans
+`redim`. « Surveiller ce dossier » ajoute à la liste ; « Retirer » arrête les
+envois d'un événement **sans rien effacer** (mémoire et tampon restent, le
+re-surveiller reprend où il en était).
+
+Architecture volontairement commune : **un seul pool de connexions et un seul
+disjoncteur** pour tous les événements — la ressource rare est le lien, pas les
+événements — et la file d'envoi **alterne équitablement** (une photo de l'un,
+une de l'autre) pour qu'un gros arriéré n'affame jamais les photos fraîches du
+concours d'à côté. Initialiser / Annuler / Réinitialiser restent par événement
+(l'outil demande lequel quand il y en a plusieurs).
+
+Le journal et le diagnostic deviennent communs (`journaux\journal.txt` et
+`journaux\diagnostic.txt`) : chaque ligne porte l'événement en tête de chemin.
+
 ### Le tampon est le plan B
 
 Il reproduit à l'identique l'arborescence attendue par Lamapix. Si l'outil ne
@@ -265,7 +283,7 @@ qu'une fois par intervalle — plus de pause de 30 s ni de scan entre chaque
 fenêtre de cinq minutes.
 
 **Quand « c'est lent » : envoyer le diagnostic.** L'outil écrit en continu
-`donnees\journaux\diagnostic_<EVENEMENT>.txt` : chaque scan, chaque copie,
+`donnees\journaux\diagnostic.txt` : chaque scan, chaque copie,
 chaque envoi y est chronométré à la milliseconde (`ENVOI_OK duree_ms=… octets=…`,
 `SCAN duree_ms=…`, `LIAISON…`, `TOUR…`). C'est ce fichier qu'il faut fournir
 pour analyser une lenteur — il désigne le coupable au lieu de le faire deviner.
@@ -291,7 +309,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-176 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+186 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
