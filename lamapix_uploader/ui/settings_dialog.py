@@ -31,6 +31,23 @@ from ..config import Config
 from ..ftp import ClientFtps, ErreurFtp, ErreurIdentifiants
 
 
+class CompteurSansMolette(QSpinBox):
+    """Un compteur que la molette ne modifie pas.
+
+    Les réglages défilent : la molette, en passant sur un compteur, changeait sa
+    valeur sans que personne ne s'en aperçoive (un « 232 s » à la place de 240,
+    vu sur un poste). La molette fait défiler la page, point ; on change une
+    valeur au clavier ou avec les flèches.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        event.ignore()
+
+
 class DialogueReglages(QDialog):
     """Modifie la config en place. `accept()` la sauvegarde sur disque."""
 
@@ -94,7 +111,7 @@ class DialogueReglages(QDialog):
         self.champ_hote = QLineEdit(self.config.ftp_hote)
         formulaire.addRow("Hôte :", self.champ_hote)
 
-        self.champ_port = QSpinBox()
+        self.champ_port = CompteurSansMolette()
         self.champ_port.setRange(1, 65535)
         self.champ_port.setValue(self.config.ftp_port)
         formulaire.addRow("Port :", self.champ_port)
@@ -132,9 +149,10 @@ class DialogueReglages(QDialog):
             "toute vérification)"
         )
         self.case_certificat.setToolTip(
-            "Normalement inutile : l'outil embarque son propre jeu de racines et "
-            "l'essaie quand celui de Windows est incomplet. Décochez, testez la "
-            "connexion, et ne recochez que si le test échoue encore."
+            "Normalement inutile : quand le serveur n'envoie pas sa chaîne de "
+            "certificats complète, l'outil va chercher lui-même ce qui manque. "
+            "Décochez, testez la connexion, et ne recochez que si le test "
+            "échoue encore."
         )
         self.case_certificat.setChecked(self.config.ignorer_certificat)
         formulaire.addRow("", self.case_certificat)
@@ -285,7 +303,7 @@ class DialogueReglages(QDialog):
 
     @staticmethod
     def _compteur(mini: int, maxi: int, valeur: int, suffixe: str) -> QSpinBox:
-        champ = QSpinBox()
+        champ = CompteurSansMolette()
         champ.setRange(mini, maxi)
         champ.setValue(valeur)
         if suffixe:

@@ -142,6 +142,22 @@ d'`api.github.com` peut manquer alors que Lamapix (Let's Encrypt) passe très bi
 sur le même PC. La vérification n'est **jamais** désactivée — cette connexion sert
 à télécharger un exécutable qu'on va ensuite lancer.
 
+**Chaîne incomplète côté Lamapix.** Le serveur FTP n'envoie que son propre
+certificat, sans l'intermédiaire qui le relie à une racine connue (son site web,
+lui, envoie la chaîne entière). Tant que Windows gardait l'ancien intermédiaire
+en cache, ça passait par chance ; au renouvellement du 18/09/2026, sous un
+intermédiaire Let's Encrypt tout neuf, plus aucun PC ne pouvait vérifier.
+L'outil fait donc ce que fait un navigateur : il lit dans le certificat où
+télécharger celui de son émetteur, remonte la chaîne, et garde le résultat dans
+`donnees\certificats\` (un accès web est nécessaire la première fois).
+
+La vérification reste entière : un intermédiaire téléchargé n'est **jamais** une
+ancre de confiance, la chaîne doit toujours finir sur une racine déjà présente
+dans le magasin. Un certificat autosigné téléchargé est écarté, et le contexte
+perd `VERIFY_X509_PARTIAL_CHAIN` — sans quoi OpenSSL accepterait comme point
+d'arrivée un certificat qu'on vient de récupérer en HTTP clair. Vérifié contre
+une fausse autorité : refusée avec ce verrou, acceptée sans.
+
 Un poste antérieur à la 1.3.0 doit être **mis à jour une fois à la main** :
 télécharger le ZIP et remplacer le dossier. Les suivantes passeront seules.
 
@@ -309,7 +325,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-186 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+205 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.

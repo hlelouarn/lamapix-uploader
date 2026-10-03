@@ -21,6 +21,8 @@ import socket
 import ssl
 from pathlib import Path, PurePosixPath
 
+from . import chaine_tls
+
 TAILLE_BLOC = 65536
 TIMEOUT_CONNEXION_PAR_DEFAUT = 30
 TIMEOUT_DONNEES_PAR_DEFAUT = 8
@@ -89,8 +91,14 @@ _INDICES_EXISTE_DEJA = ("existe déjà", "already exists")
 _INDICES_FRAGMENT = (".in.", "caché", "cache", "hidden", "temporaire", "temporary")
 
 
-def _contextes_ssl(ignorer_certificat: bool) -> list[ssl.SSLContext]:
+def _contextes_ssl(
+    ignorer_certificat: bool, intermediaires: list[bytes] | tuple[bytes, ...] = ()
+) -> list[ssl.SSLContext]:
     """Magasins de certificats essayés dans l'ordre, comme pour les mises à jour.
+
+    `intermediaires` : certificats récupérés par `chaine_tls` quand le serveur
+    n'envoie pas sa chaîne complète. Ils aident à CONSTRUIRE la chaîne, jamais à
+    la terminer.
 
     Les PC de terrain n'ont souvent qu'un socle de racines, sans accès réseau
     pour le compléter : la vérification échoue alors que le certificat de
@@ -108,6 +116,19 @@ def _contextes_ssl(ignorer_certificat: bool) -> list[ssl.SSLContext]:
         contextes.append(ssl.create_default_context(cafile=certifi.where()))
     except Exception:
         pass
+
+    if intermediaires:
+        for contexte in contextes:
+            # Indispensable : avec PARTIAL_CHAIN (actif par défaut depuis Python
+            # 3.13), tout certificat du magasin vaut ancre de confiance — y
+            # compris ces intermédiaires, téléchargés en HTTP clair. Sans lui,
+            # ils ne servent qu'à relier la feuille à une VRAIE racine.
+            contexte.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+            for der in intermediaires:
+                try:
+                    contexte.load_verify_locations(cadata=der)
+                except ssl.SSLError:
+                    continue
     return contextes
 
 
@@ -145,18 +166,49 @@ class ClientFtps:
     def connecter(self) -> None:
         if self._ftp is not None:
             return
-        contextes = _contextes_ssl(self.ignorer_certificat)
-        for rang, contexte in enumerate(contextes):
-            try:
-                self._ftp = self._ouvrir_session(contexte)
-                return
-            except ssl.SSLCertVerificationError as exc:
-                # Racine absente du magasin courant : on essaie le suivant.
-                if rang == len(contextes) - 1:
-                    raise ErreurFtp(
-                        "le certificat de Lamapix n'a pas pu être vérifié sur ce "
-                        f"PC (magasin de racines incomplet ?) : {exc}"
-                    ) from exc
+        if self.ignorer_certificat:
+            self._ftp = self._ouvrir_session(_contextes_ssl(True)[0])
+            return
+
+        derniere: Exception | None = None
+        for passe in (1, 2):
+            intermediaires = chaine_tls.connus(self.hote, self.port)
+            for contexte in _contextes_ssl(False, intermediaires):
+                try:
+                    self._ftp = self._ouvrir_session(contexte)
+                    return
+                except ssl.SSLCertVerificationError as exc:
+                    derniere = exc  # magasin suivant
+            # Aucun magasin ne suffit : le serveur n'envoie sans doute pas sa
+            # chaîne complète. On va chercher ce qui manque, une seule fois.
+            if passe == 1 and not chaine_tls.completer(
+                self.hote, self.port, self._certificat_du_serveur
+            ):
+                break
+
+        raise ErreurFtp(
+            "le certificat de Lamapix n'a pas pu être vérifié : le serveur "
+            "n'envoie pas sa chaîne complète et le certificat intermédiaire n'a "
+            "pas pu être récupéré (un accès web est nécessaire la première "
+            f"fois). Détail : {derniere}"
+        ) from derniere
+
+    def _certificat_du_serveur(self) -> bytes:
+        """Le certificat présenté par le serveur, lu SANS le vérifier.
+
+        Poignée de main seule : aucun identifiant n'est envoyé sur cette
+        connexion non vérifiée, elle est refermée aussitôt.
+        """
+        ftp = ftplib.FTP_TLS(context=ssl._create_unverified_context())
+        try:
+            ftp.connect(self.hote, self.port, timeout=self.timeout)
+            ftp.auth()
+            der = ftp.sock.getpeercert(binary_form=True)  # type: ignore[union-attr]
+        finally:
+            self._fermer_silencieusement(ftp, poli=False)
+        if not der:
+            raise ErreurFtp("le serveur n'a présenté aucun certificat")
+        return der
 
     def _ouvrir_session(self, contexte: ssl.SSLContext) -> ftplib.FTP_TLS:
         ftp = ftplib.FTP_TLS(context=contexte)
