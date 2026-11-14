@@ -325,7 +325,7 @@ $env:PYTHONUTF8 = 1
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-205 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
+206 tests. Le moteur est testé de bout en bout contre un **faux serveur Lamapix**
 (`tests/conftest.py`) qui rejoue les pièges du terrain : dossiers consommés en
 cours de route, 550 passagers, pannes durables, identifiants refusés. Aucun test
 ne touche le vrai serveur.
