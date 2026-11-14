@@ -229,6 +229,30 @@ class TestPannesEtReprises:
         assert moteur.etat().identifiants_refuses is True
         assert deposes(serveur) == set()
 
+    def test_un_mot_de_passe_refuse_nest_pas_rejoue_en_boucle(
+        self, source, serveur, fabrique_moteur
+    ):
+        """Rejouer un identifiant faux à chaque tour, c'est une attaque par
+        force brute aux yeux du serveur : il bannit l'adresse — celle du wifi du
+        salon entier, autres PC compris. Après un 530, plus aucune connexion
+        tant que les réglages n'ont pas changé."""
+        serveur.identifiants_invalides = True
+        poser_photo(source, PHOTO_A)
+        moteur = fabrique_moteur(source, connexions_paralleles=2)
+
+        moteur._un_tour()
+        tentatives = serveur.tentatives_login
+        for _ in range(10):
+            delai = moteur._un_tour()
+        assert serveur.tentatives_login == tentatives
+        assert delai == moteur.config.intervalle_scan  # et pas 1 s
+
+        # Réglages enregistrés : on réessaie, une fois.
+        serveur.identifiants_invalides = False
+        moteur.recharger_config()
+        moteur._un_tour()
+        assert deposes(serveur) == {"2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"}
+
     def test_rien_nest_perdu_apres_une_panne(self, source, serveur, fabrique_moteur):
         """La photo en échec reste en attente : elle repartira, pas question de l'oublier."""
         maudite = "2026-08-02GRANDPRIX/DUPONT MARIE_ECLAIR/a.jpg"

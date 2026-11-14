@@ -36,6 +36,7 @@ class FauxLamapix:
         self.fichiers: dict[str, bytes] = {}
         self.echecs_pour: dict[str, int] = {}   # rel -> nombre d'échecs restants
         self.identifiants_invalides = False
+        self.tentatives_login = 0
         self.stors: list[str] = []
         self.connexions = 0
         # HiddenStores de ProFTPD : un envoi coupé laisse un `.in.<nom>.` qui
@@ -77,6 +78,8 @@ class ClientFauxLamapix:
     def _connecter(self) -> None:
         if self._connecte:
             return
+        with self.serveur.verrou:
+            self.serveur.tentatives_login += 1
         if self.serveur.identifiants_invalides:
             raise ErreurIdentifiants("530 Login incorrect")
         with self.serveur.verrou:

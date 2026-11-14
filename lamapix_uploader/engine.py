@@ -489,7 +489,7 @@ class Moteur:
         """1 s s'il reste des photos prêtes à partir, 5 s si tout attend une
         reprise, sinon le rythme de scan normal. Les fenêtres d'envoi
         s'enchaînent au lieu d'être entrecoupées de 30 s de vide."""
-        if self._en_pause:
+        if self._en_pause or self._identifiants_refuses:
             return float(self.config.intervalle_scan)
         with self._verrou:
             en_attente = [
@@ -672,6 +672,16 @@ class Moteur:
         mot_de_passe = self._mot_de_passe()
         if not mot_de_passe:
             self._noter("Mot de passe Lamapix non renseigné — ouvrez les réglages.")
+            return
+        if self._identifiants_refuses:
+            # Surtout ne pas réessayer : le même identifiant faux, rejoué à
+            # chaque tour (une seconde depuis la 1.7.0), ressemble à une attaque
+            # par force brute — le serveur finit par bannir l'adresse, celle du
+            # wifi du salon entier comprise. On attend que les réglages changent.
+            self._noter(
+                "Identifiants refusés par Lamapix — envois arrêtés. Corrigez "
+                "l'identifiant ou le mot de passe dans les réglages."
+            )
             return
 
         file = self._construire_file(contextes)
